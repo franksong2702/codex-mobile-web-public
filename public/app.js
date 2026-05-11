@@ -200,13 +200,10 @@ function isMenuOverlayMode() {
 }
 
 function viewportHeight() {
-  const visual = window.visualViewport;
-  const visualHeight = visual && Number(visual.height);
-  const visualTop = visual && Number(visual.offsetTop || 0);
+  const visual = window.visualViewport && Number(window.visualViewport.height);
   const inner = Number(window.innerHeight);
   const client = document.documentElement && Number(document.documentElement.clientHeight);
-  const adjustedVisual = visualHeight ? Math.max(0, visualHeight - Math.max(0, visualTop || 0)) : 0;
-  return Math.max(320, Math.round(adjustedVisual || inner || client || 0));
+  return Math.max(320, Math.round(visual || inner || client || 0));
 }
 
 function updateViewportVars() {

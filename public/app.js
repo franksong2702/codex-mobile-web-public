@@ -354,7 +354,7 @@ const MAX_LIVE_TEXT_CHARS = 60000;
 const MAX_VISIBLE_TURNS = 10;
 const MAX_EXPANDED_VISIBLE_TURNS = 200;
 const THREAD_LIST_PAGE_LIMIT = 40;
-const CLIENT_BUILD_ID = "0.1.11|codex-mobile-shell-v311";
+const CLIENT_BUILD_ID = "0.1.11|codex-mobile-shell-v312";
 const PLUGIN_VOICE_INPUT_LONG_PRESS_MS = 560;
 const LONG_RECEIPT_SCROLL_CHARS = 1200;
 const THREAD_HISTORY_TOP_LOAD_PX = 64;
@@ -3732,6 +3732,34 @@ function updateThreadListStatus(threadId, status) {
   if (state.currentThread && String(state.currentThread.id || "") === id) state.currentThread.status = status;
 }
 
+function threadListSummaryFromDetailThread(thread) {
+  if (!thread || typeof thread !== "object" || !thread.id) return null;
+  const summary = Object.assign({}, thread);
+  delete summary.turns;
+  delete summary.runtimeSettings;
+  delete summary.threadTaskCards;
+  delete summary.mobileLoading;
+  delete summary.mobileLoadError;
+  delete summary.mobileReadWarning;
+  return summary;
+}
+
+function mergeThreadIntoThreadList(thread) {
+  const summary = threadListSummaryFromDetailThread(thread);
+  if (!summary) return false;
+  const id = String(summary.id);
+  const index = state.threads.findIndex((entry) => String(entry && entry.id || "") === id);
+  if (index >= 0) {
+    state.threads = state.threads.map((entry, entryIndex) => (
+      entryIndex === index ? Object.assign({}, entry, summary) : entry
+    ));
+  } else {
+    state.threads = [summary, ...state.threads];
+  }
+  state.threads = visibleThreads(state.threads);
+  return true;
+}
+
 function isRunningStatus(status) {
   const text = statusText(status).toLowerCase();
   return /(running|active|queued|processing|inprogress|in_progress|in-progress)/.test(text)
@@ -6720,6 +6748,7 @@ async function loadThread(threadId, options = {}) {
     && !state.currentThread.mobileLoading
     && !state.currentThread.mobileLoadError) {
     followThreadOpenToBottom(threadId);
+    mergeThreadIntoThreadList(state.currentThread);
     renderThreads();
     renderCurrentThread({ stickToBottom: true });
     if (isMenuOverlayMode()) closeSidebarMenu();
@@ -6828,6 +6857,7 @@ async function loadThread(threadId, options = {}) {
   const renderStartedAt = nowPerfMs();
   syncThreadPendingServerRequests(result.thread);
   state.currentThread = mergeThreadPreservingVisibleItems(state.currentThread, result.thread);
+  mergeThreadIntoThreadList(state.currentThread);
   localStorage.setItem(STORAGE_THREAD_ID, threadId);
   draftStore.setTargetKey("");
   followThreadOpenToBottom(threadId);
@@ -6957,6 +6987,7 @@ async function refreshCurrentThread(options = {}) {
   if (state.currentThreadId !== threadId || seq !== state.threadLoadSeq) return;
   const renderStartedAt = nowPerfMs();
   state.currentThread = mergeThreadPreservingVisibleItems(state.currentThread, result.thread);
+  mergeThreadIntoThreadList(state.currentThread);
   renderComposerSettings();
   syncActiveTurnFromThread();
   renderThreads();
@@ -7035,6 +7066,7 @@ async function backfillFullThreadDetail(threadId, options = {}) {
   const wasNearBottom = isConversationNearBottom();
   syncThreadPendingServerRequests(result.thread);
   state.currentThread = mergeThreadPreservingVisibleItems(state.currentThread, result.thread);
+  mergeThreadIntoThreadList(state.currentThread);
   renderComposerSettings();
   syncActiveTurnFromThread();
   renderThreads();

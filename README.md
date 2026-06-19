@@ -4,6 +4,7 @@ Codex Mobile Web is a local web client for reading and controlling Codex session
 
 This repository does not contain Codex credentials, uploaded files, or a bundled Codex binary. Those are local runtime state on each machine.
 
+- 中文说明：v312 修复打开已在运行的会话详情后，线程列表行可能继续显示旧状态、需要等下一次列表刷新才出现 running spinner 的问题。详情读取和 live poll 现在会立即把当前会话摘要同步回列表行。PWA shell cache 升级到 `codex-mobile-shell-v312`。
 - 中文说明：v311 修复模型、推理强度和权限运行时菜单在 iOS PWA/WebView 下可能点不开的问题。运行时菜单和额度详情浮层现在与 `@` 意图菜单一样位于页面级 DOM，不再作为 Composer 表单控制行的子元素；触摸 `pointerdown` 后的合成 `click` 只会按同一按钮吞掉一次，避免同一次点击先打开又关闭菜单。PWA shell cache 升级到 `codex-mobile-shell-v311`。
 - 中文说明：v310 在导航菜单现有版本按钮里直接显示当前客户端壳版本，例如 `v0.1.11 · 客户端 v310`。这个值来自浏览器实际加载的 `CLIENT_BUILD_ID`，用于区分服务端已更新但 PWA/WebView 仍停留在旧前端壳的情况；按钮仍保留原来的更新检查入口。PWA shell cache 升级到 `codex-mobile-shell-v310`。
 - 中文说明：v309 修复 Reset 后 Composer 运行设置控件回退的问题。新线程和旧草稿的权限默认值现在优先使用服务端按 `config.toml` 推导的 `defaultPermissionMode`，当前 full-access 配置会显示并提交“完全访问权限”；在默认 full 的环境里，旧草稿里的 `custom` 会折算为 `full`。模型、推理和权限控件增加 click 兜底和受限菜单诊断事件，弹层按按钮与 `visualViewport` 定位，避免 iOS WebView/键盘状态下菜单不可见。PWA shell cache 升级到 `codex-mobile-shell-v309`。

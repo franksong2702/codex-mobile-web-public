@@ -375,7 +375,7 @@ function replayMissedNotifications(client, reason) {
 
 function replayNotificationMessageForClient(entry, client) {
   const message = cloneJson(entry && entry.message);
-  if (!isMobileWebClient(client) || !message || message.type !== "notification") return message;
+  if (!isMobileWebClient(client) || !message || hasId(message) || !message.method) return message;
   if (!message.params || typeof message.params !== "object") return message;
   message.params.mobileReplay = true;
   if (entry && entry.receivedAt) message.params.mobileReplayReceivedAtMs = entry.receivedAt;
@@ -429,6 +429,7 @@ function buildUserMessageNotification(params) {
           : `mux-user-${Date.now()}-${nextSyntheticItemId++}`,
         type: "userMessage",
         content,
+        clientSubmissionId: params.clientSubmissionId ? String(params.clientSubmissionId) : "",
       },
     },
   };

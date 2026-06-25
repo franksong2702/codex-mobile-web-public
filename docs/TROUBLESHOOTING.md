@@ -20,21 +20,26 @@ Interpretation:
 | Mobile Web offline | `GET /api/public-config`, 8787 listener PID, startup log |
 | Messages not visible in Desktop | `/api/status` endpoint vs `endpoint.json`, Desktop launched through shared launcher |
 | Send appears accepted then disappears | active turn id, recent turn history, pending echo, latest rollout growth |
+| Same submitted user message appears twice while the turn is thinking | Inspect whether one item is a browser `local-user-*` echo and the other is a server `mux-user-*` or durable `userMessage` echo for the same `clientSubmissionId`. Clients after `codex-mobile-shell-v396` merge these at the thread-normalization layer using submission id, deterministic mux id suffix, and content signature; if duplication remains, compare `/api/threads/:id?mode=recent` against the open shell before adding render-layer filtering. |
 | Thread looks stuck | rollout size/mtime, pending approvals, live command/tool process, latest turn status |
 | Old command appears running | latest turn id vs raw operation fallback call id/turn id, app version includes raw-operation fix |
 | PWA still shows old UI | `/api/public-config.clientBuildId`, browser shell cache, service worker cache name |
 | Refresh prompt repeats after a static bump | Compare `/api/public-config.clientBuildId` and `shellCacheName` with served `/app.js` and `/sw.js`; current builds read shell metadata on each config request and do not use plain `version` for this comparison |
 | Push missing | HTTPS/Tailscale access, VAPID files, subscription count, sub-agent suppression |
 | Push says turn ended but no final reply appears | rollout `task_complete.last_agent_message`, completion-push no-final-message guard |
+| Turn accepts a message then ends with no visible reply | inspect rollout for `task_complete.last_agent_message: null` and no scoped `user_message` / `agent_message`; current detail projection renders a `turnDiagnostic` item with code `runtime_completed_without_response` rather than fabricating an assistant reply |
 | First open after completion lacks the latest receipt | `/api/threads/:id?mode=recent` read mode, whether the latest rollout EOF line is a complete `task_complete` JSON object without a trailing newline, and whether enrichment index exposes a provisional entry |
 | Same turn shows two final receipts and only one has Usage | Compare `/api/threads/:id?mode=recent` service projection against the open client shell. If the API has one `agentMessage` plus one `turnUsageSummary` but the page shows two receipts, the failure layer is browser V4 local-visible merge; current clients after `codex-mobile-shell-v390` drop local-only live receipts once a completed server turn has an authoritative receipt. |
 | Final receipt appears, disappears, then returns one line shorter | Compare the live active receipt text and completed service projection receipt text for the same turn, then inspect `/api/client-events` for `thread_refresh_ms.locallyPatchedDetail`. Clients after `codex-mobile-shell-v391` preserve same-prefix completed receipt identity; clients after `codex-mobile-shell-v392` also keep post-completion refreshes on the local item patch path when only receipt/Usage items change. |
+| Bottom Command/status row disappears during a running turn | Check viewport first. Wide clients after `codex-mobile-shell-v394` keep the one-line dock stable during reasoning-only active turns. Phone-width clients after `codex-mobile-shell-v395` intentionally do not reserve a bottom row: pure reasoning is shown only by the top-right timer, and real command/file/tool/search activity appears as a floating operation bubble above the composer with short summary and elapsed time. Clients after `codex-mobile-shell-v402` keep the last same-thread operation bubble visible for at least 500ms even when the operation finishes before the next full thread render, and the expiry refresh updates only the dock instead of rerendering the conversation. Clients after `codex-mobile-shell-v403` keep a small same-thread recall dot after that temporary bubble disappears; tap it to reopen the last operation detail sheet without restoring a permanent bottom row. Clients after `codex-mobile-shell-v404` align that recall dot with the lower-right scroll controls using the same 36px size and right edge. Clients after `codex-mobile-shell-v405` keep those dwell/pinned/recall decisions in `public/live-operation-dock-state.js`; regressions should be tested there before adding render fallbacks. |
+| Command row has no detail on macOS | First inspect `/api/threads/:id?mode=recent`: if `commandExecution.command` is empty, the failure layer is server raw-operation projection from rollout `function_call.arguments`; current server code reads `command`/`cmd`/`shellCommand`/`shell_command` from object or JSON-string arguments. If the API has a non-empty command but the dock/bubble is blank, inspect the v394+ frontend `operationCommandText()` path. |
 | Continuation fails because source thread cannot reply | continuation job progress `handoff-fallback`, generated `.agent-context/thread-handoffs/*.md` mode, `/api/status` profile/quota |
 | Profile switch hides workspaces or threads | active `codexProfiles.activeCodexHome`, non-default profile shared-state links, `/api/threads?limit=10` |
 | Quota chips show the previous account after switch | `/api/status.rateLimits`, browser quota localStorage, profile-switch cache clearing, shared `sessions/` quota fallback |
 | Archived projectless thread reappears | session-index fallback, `archived_sessions`, `test/thread-archive.test.js` |
 | After profile switch only a few workspaces or no threads appear | `/api/public-config.codexProfiles.activeCodexHome`, profile state links, and `state_5.sqlite` / `sessions` under the active home |
 | Threads are visible but names/times stay stale | `/api/threads` row `name`/`updatedAt`, state DB `title`/`updated_at`, rollout file mtime, fallback merge tests |
+| Large session first open is slow | On clients after `codex-mobile-shell-v405`, inspect `/api/client-events` `thread_detail_first_paint.serverTimings` and `performancePhase`. `warm-projection-cache` points away from rollout rebuild and toward network/DOM render, `cold-thread-read` points at full app-server read/projection seed, `cold-turns-list-initial` points at the bounded turns-list first paint path, and thread-list slowness should be checked through `thread_list_rendered.serverTimings` / `performancePhase` for `warm-fallback-cache` vs `cold-fallback-build`. |
 | Running-thread indicator disappears | `/api/threads` row `status` and `rolloutSizeUpdatedAtMs`, rollout tail `task_started` / `task_complete`, `runningThreadIds`, stale browser shell |
 | Thread detail shakes during streaming output | Client shell version v317+, `/api/client-events` `conversation_render_ms`, `thread_refresh_ms.skippedDetailRender`, `thread_refresh_ms.locallyPatchedDetail`, compact Command dock height, stale PWA shell |
 | Listener/app-server update interrupts a running turn | Browser shell `codex-mobile-shell-v280+`, `/api/status.ready` recovery, bounded `auto_turn_recovery_result` client event, `/api/threads/:id/auto-recover` route |
@@ -315,7 +320,13 @@ rollout file mtime as a fallback `updatedAt` source. This lets a Hermes/remote
 client show or clear the spinner even when app-server only returns `notLoaded`.
 The browser still keeps `runningThreadIds` across thread-list refreshes where
 the row only says `notLoaded`, and current-thread `turn/started` /
-`turn/completed` notifications write back to the matching sidebar row. For
+`turn/completed` notifications write back to the matching sidebar row. Derived
+background `thread/status/changed` notifications created from
+`turn/completed` must include the completion `eventAtMs` when available; if the
+server emits a terminal status without a fresh event time, the browser's
+replay-aware freshness policy may keep the local running hint and make the
+outer thread list look like it is still refreshing after the detail page has
+ended. For
 background work started by normal sends, source-direct or automatic task cards,
 auto-recover, side-chat apply, continuation handoff/bootstrap, or ChatGPT Pro
 bridge starts, the server must broadcast `thread/status/changed active`
@@ -435,6 +446,13 @@ Cause to check:
   items are not enough to suppress this fallback. Existing matching receipts
   must not be replaced, and failed, cancelled, interrupted, active, or
   in-progress turns must not receive this fallback.
+- If rollout has `task_complete` / `task_completed` with an explicit empty
+  final assistant message, do not synthesize a normal `agentMessage`. That
+  indicates the runtime completed the turn without a response. The detail
+  projection should attach a `turnDiagnostic` item with
+  `runtime_completed_without_response`, preserve it through receipt-only
+  compaction, and suppress normal completion Push for that no-final-message
+  shape.
 - If `thread/turns/list` omits the latest completed turn entirely while the
   thread summary `updatedAt` and rollout tail both point to a later
   `task_complete`, the compacted detail response must append that completed
@@ -936,13 +954,16 @@ ambiguous failure instead of a bounded task-card diagnostic.
 
 For source-thread direct task-card creation through
 `/api/threads/:sourceThreadId/task-cards`, target resolution is intentionally
-stricter than the manual pending-card API. `409 stale_target_thread` means the
-requested thread exists or was found in fallback state, but it is not the latest
-visible canonical thread for that cwd/workspace; use `details.currentTarget`.
-`404 target_thread_not_visible` means the id/title/cwd is not currently
-deliverable from the non-archived visible thread list. Dynamic tool calls and
-`scripts/create-thread-task-card.js` share this same guard, so fallback cannot
-bypass stale-target rejection.
+stricter than the manual pending-card API. Exact `targetThreadId` and exact
+`targetThreadTitle` are thread identity and may point to any normal
+non-archived thread, even when several threads share the same cwd/workspace.
+`400 target_thread_self` means the caller tried to send a card to the same
+source thread. `409 target_thread_archived` means the target is archived,
+deleted, or otherwise not deliverable. `404 target_thread_not_visible` means
+the id/title/cwd is not currently deliverable. `targetCwd` /
+`targetWorkspace` are fuzzy workspace targets and choose a current visible
+thread for that workspace. Dynamic tool calls and
+`scripts/create-thread-task-card.js` share this same guard.
 
 ## `#` Task-card Command Does Not Parse
 

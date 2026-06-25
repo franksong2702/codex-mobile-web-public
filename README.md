@@ -1,6 +1,436 @@
 # Codex Mobile Web
 
-- 中文说明：v393 合并远端 v392 的线程状态、完成回执和详情刷新稳定性修复，并保留大 session 详情首屏 deferred enrichment。对于已经命中 thread-detail projection 的大 rollout，首屏请求先保留 projection 中的真实消息和 Final Answer，延后 Usage、工具图片、时间戳等 rollout enrichment；浏览器首屏渲染后再用 `enrich=1` 后台补齐，避免 20MB+ session 每次点击都把可选 enrichment 压在首屏路径上。PWA shell cache 升级到 `codex-mobile-shell-v393`。
+## 中文总览
+
+Codex Mobile Web 是一个面向手机、平板和嵌入式 Home AI 插件场景的
+Codex 本地 Web 客户端。它通过本机的 Codex app-server 读取和控制
+Codex 线程，支持移动端查看线程、发送消息、上传图片和文件、观察实时
+命令/工具状态、跨线程任务卡协作、Home AI embedded iframe 运行、
+Web Push/Action Inbox 通知，以及与 Codex Desktop 共享 app-server
+mux 的实时同步。
+
+这个仓库的近期工作重点不是增加单点功能，而是修复长期演进后暴露出的
+架构问题：线程详情投影、线程列表内存缓存、跨线程任务卡、移动端
+Composer/operation 状态、Home AI 插件嵌入和 public 发布流程都已经变成
+核心路径。当前版本按 Home AI 的 root-cause-first 规则处理这些问题：
+先定位失败层和状态所有权，再把可复用策略抽到服务或纯前端 helper，
+避免用前端二次刷新、去重兜底或静默 fallback 掩盖根因。
+
+## 2026-06-24 公开发布说明（v424 平铺窗口管理与架构重构）
+
+本次 public 发布是在 Mac production 已先部署并通过用户验证后的同步。
+发布内容覆盖最近几轮生产修复和第一阶段架构重构，核心目标是让
+Codex Mobile 在大线程、任务卡协作和移动端实时状态下更稳定、更可解释。
+
+### 1. 第一阶段架构重构
+
+早期 Codex Mobile Web 的需求比较简单，很多逻辑集中在 `server.js` 和
+`public/app.js`。随着投影缓存、任务卡、Home AI 插件模式、MCP 工具集、
+线程列表内存缓存和移动端状态同步持续加入，入口文件已经承担了过多状态
+规则。第一阶段重构先处理后端最容易反复出问题的边界：
+
+- `adapters/thread-task-card-routing-service.js`：跨线程任务卡目标解析、
+  exact thread id/title、同 workspace 多线程投递、归档/隐藏/sidecar/
+  subagent 拒绝规则。
+- `adapters/thread-turn-compaction-policy-service.js`：线程详情中哪些 turn
+  保留完整 operation、哪些只保留 receipt/Usage 的服务端压缩策略。
+- `adapters/thread-completion-diagnostic-service.js`：runtime 明确 completed
+  但没有最终 assistant 回复时，生成可见 `turnDiagnostic` 诊断，而不是伪造
+  assistant 回执。
+- `adapters/thread-detail-projection-input-service.js`：projection cache
+  输入签名，包括 rollout path/size/mtime、summary 状态和 retained-turn
+  window。
+- `adapters/thread-detail-projection-result-service.js`：projection cache hit
+  后如何合并 summary、标题、runtime model/effort、read mode 和公开元数据。
+- `adapters/thread-list-fallback-cache-service.js`：线程列表 fallback cache
+  的进程内 baseline、TTL 诊断开关和增量 status/title/archive update。
+- `adapters/thread-detail-summary-service.js`：详情 summary lookup 顺序，
+  保持 state DB -> started-cache -> rollout-session -> app-server 的可解释
+  顺序。
+
+这轮重构不是“大爆炸重写”。`server.js` 仍是 HTTP 路由和 app-server
+编排入口，`public/app.js` 仍然很大；但高风险策略已经开始服务化，并有
+聚焦测试覆盖。后续重构会继续按问题热区推进，而不是一次性改完整个系统。
+
+### 2. 吸收式合并 PR #78
+
+PR #78 的价值点是：线程列表上的 running/unread 状态不能只看最后一次
+刷新结果，还要考虑用户是否已经查看线程、Mobile 端提交后的短期处理中
+状态、以及 mux replay 事件的时间顺序。这个方向是正确的。
+
+本次没有原样合并 PR #78，而是按当前架构吸收其有效设计：
+
+- 新增 `public/thread-status-hints.js`，把线程 running/unread/viewed/
+  submitted-processing/mux replay freshness 规则做成纯前端策略模块。
+- `public/app.js` 记录 `codexMobileThreadViewedAtById`，进入线程后更新
+  viewed 时间，避免已读线程继续显示错误未读点。
+- 发送消息后保留短期 submitted-processing 状态，防止 app-server 或
+  replay 事件还没追上时线程列表不显示“已启动/处理中”。
+- `codex-app-server-mux.js` 给 Mobile notification replay 增加
+  `mobileReplay`、`mobileReplayReceivedAtMs`、`mobileReplaySeq`，客户端
+  可以识别断线重放的旧 completion，避免旧事件清掉新的 running 状态。
+
+这属于“吸收式合并”：保留 PR #78 中对状态 freshness 的正确洞察，但把
+实现融入本仓库已有的状态所有权和测试体系，而不是直接复制 PR 代码。
+
+### 3. 为什么没有合并 PR #78 的大 session 首屏 deferred enrichment
+
+PR #78 里另一个方向是大 session 首屏先返回不完整 detail，再通过后续
+enrichment 或二次刷新补齐。这个方案短期可能让首屏看起来更快，但它把
+用户可见页面变成“两阶段事实”：第一阶段先缺一部分内容，第二阶段再替换
+或补齐。对 Codex Mobile 当前的问题形态来说，这会重新引入我们刚修过的
+抖动、回执替换、Usage 迟到、任务卡淹没和图片投影不一致等风险。
+
+所以本次明确不合并这一部分。大 session 首屏慢应该继续归属到服务端
+projection/cache/cold-path 体系内解决，而不是由前端接受一个临时不完整
+页面再靠刷新补齐。当前策略是：
+
+- 线程列表 fallback cache 只在服务冷启动/重启后建立 baseline，后续靠
+  增量事件同步，不再普通刷新反复全量重扫。
+- 详情 projection cache 的 input/result/summary 边界已经拆出，可以精确
+  测量慢在 rollout 扫描、projection seed、app-server read 还是 DOM patch。
+  生产采样显示 Home AI/Codex Mobile 大线程在服务进程存活期间能走
+  dynamic projection warm path，但服务重启后磁盘 cache 可能因为旧
+  rollout size/mtime 签名失效而掉回 full `thread/read`。本轮修正会把
+  完整、非 partial 的 dynamic projection 以节流方式落盘，并在落盘前刷新
+  rollout stat 签名；通知-only 的 partial 壳仍然不能作为有效详情缓存。
+  对仍在增长的大 rollout，如果重启后 projection miss，服务端会先用
+  `thread/turns/list` 读取当前 retained window 并 seed projection，只有这个
+  有界读取失败时才回 full `thread/read`。
+- 本次同步新增 `adapters/thread-detail-read-orchestration-service.js`，
+  把 `/api/threads/:id` 的 summary、projection hit、recent turns-list、
+  full `thread/read`、turns-list fallback 和 summary fallback 顺序从
+  `server.js` route 中抽成可测试 coordinator。它保持 full `thread/read`
+  优先契约，不用 PR #78 的 deferred incomplete detail 方案。
+- 首屏优化必须保持“返回内容就是当前权威内容”的不变量。允许局部骨架和
+  bounded loading 状态，但不允许用缺失最终回执、缺 Usage、缺任务卡详情
+  的页面作为正常完成态。
+
+### 4. 最近用户可见修复
+
+- v424：平铺模式下，从外层线程列表主动进入一个当前不可见的线程时，会用该线程替换
+  最后一个可见 pane，并保存新的服务器端 slot 顺序；普通 recent 排序和后台刷新仍不能
+  重排已固定 pane。
+- v423：平铺窗口增减移入线程名菜单。点击 pane 标题打开线程列表后，菜单顶部提供
+  `关闭窗口` 和 `新增窗口`；不再在平铺画面右上角放浮动 `− / +` 控件，避免遮挡内容。
+- v422：平铺模式增加动态窗口数。设备宽度只决定最大容量，实际显示窗口数由
+  `threadDisplay.paneCount`、当前/运行线程数和菜单中的窗口操作共同决定；两个窗口会使用
+  两列显示，不再在四列设备上被自动塞满到四个窄窗口。
+- v421：修正平铺状态和线程状态刷新。平铺开关、pane 槽位顺序和选中 pane
+  改为服务器 runtime `threadDisplay` 设置，Home AI/PWA 刷新和多设备打开不再丢失；
+  线程列表 recent 排序只能补空位，不能重排已固定 pane。平板横屏按宽度可显示到
+  4 栏。后台 `turn/completed` 派生的线程状态通知带完成事件时间，避免外层列表在
+  详情已结束后仍显示刷新。平铺命令气泡时间槽和 Composer runtime 工具栏大字体
+  溢出也收窄到稳定布局。
+- v420：修正手机端右下浮动控件的状态归属。`回到底部` 和 `回到本轮总结`
+  复用同一个浮动槽位且互斥显示，`回到底部` 优先；operation bubble/recall
+  只在当前 turn 仍是 live 时可见，turn 完成并显示最终回执后不再保留命令入口。
+- v404：统一手机端右下浮动控件尺寸和对齐。向下/向上滚动按钮与
+  operation recall 点都使用 36px 控件、同一右边距和固定垂直间距，避免同时
+  出现时一大一小、边缘不齐。
+- v403：移动端 operation bubble 消失后，右下角保留同线程最近一次
+  command/file/tool/search 的小圆点入口。它不占 conversation 布局，不覆盖回执；
+  点击后展开最近 operation 详情 sheet，再次点击或下拉可收起。
+- v402：修正移动端 operation bubble 仍然闪一下的问题。现在同一线程的
+  最后一个真实 command/file/tool/search 气泡会至少停留 500ms；到期只刷新
+  dock，不再调用整线程 `renderCurrentThread()`，减少 Composer 和上方消息区
+  联动闪动。
+- v401：吸收 PR #78 的线程状态 freshness 设计，修复断线 replay 或提交后
+  短窗口导致线程列表不显示运行状态、未读点错误的问题。
+- v400：修正任务卡来源线程标题，避免续接 bootstrap 文本被当作来源线程名；
+  同时自动接受 CodeGraph 只读 MCP elicitation，减少无意义授权弹窗。
+- v399/v398：跨线程任务卡不再按普通 `You` 消息显示，长卡片默认折叠，只在
+  头部展示来源线程、目标和摘要，避免长任务卡把回执和 Usage 淹没。
+- 同 workspace 多线程任务卡投递已修正：exact `targetThreadId` 是线程身份；
+  只要目标未归档、未隐藏、非 sidecar/subagent，就允许同 cwd 投递。归档目标
+  会显式拒绝。
+
+### 5. 后续计划
+
+后续目标分四层推进：
+
+1. **大 session 性能闭环**：第一步已经把 thread detail read orchestration
+   服务化；第二步已定位并修正 dynamic projection 不持久化导致重启后冷读
+   大 rollout 的问题；第三步把大 rollout projection miss 的首读改成服务端
+   bounded turns-list 当前窗口优先，避免 full `thread/read` 成为常态冷路径。
+   后续继续采集重启/冷开和 warm cache 的分层耗时证据，分别测量 thread list
+   fallback、thread detail summary、projection seed/cache、rollout enrichment、
+   app-server read 和前端 DOM patch。只有确认慢点后才做下一轮结构优化。
+2. **继续拆 `public/app.js`**：优先拆 thread detail merge、conversation patch、
+   composer/viewport、operation dock/bubble、task-card UI 这几块，把状态机变成
+   可测试 helper，而不是继续堆在单个入口文件里。
+3. **补强持久化失败处理**：任务卡 store 和其他 workflow-critical store 不能在
+   corrupt/unreadable 时静默当空状态；需要 fail-closed 或 bounded diagnostic，
+   并保留可恢复证据。
+4. **增强真实 UI 覆盖**：补 DOM/browser/视觉 smoke，覆盖移动端闪动、图片上传与
+   generated image 渲染、PWA shell refresh、任务卡展开折叠和 Home AI embedded
+   proxy-safe URL。
+
+发布顺序保持不变：先本地/private workspace 实现和验证，再部署 Mac production，
+用户确认后才同步 public。public 发布不包含 `.agent-context`、runtime state、
+本地密钥、上传内容、日志、访问 key 或机器特定诊断。
+
+### 6. v424/v423/v422/v421/v420/v419/v418/v417/v416/v415/v414/v413/v412/v411/v410/v409/v408 重构进展（v424 已部署 Mac production，已同步 public）
+
+本轮包含一个 server-only 架构补充：thread detail read orchestration 已抽到
+`adapters/thread-detail-read-orchestration-service.js`。随后新增 v421-v424 前端/服务端状态修正，
+PWA shell cache 升级到 `codex-mobile-shell-v424`。
+
+v424 修正外层线程列表进入与固定 pane 的关系：
+
+- 平铺模式保存窗口后，如果外层线程列表主动打开了一个当前不可见的线程，浏览器会把
+  最后一个可见 pane slot 替换为该线程。
+- 这个替换被视为用户显式选择，会写入服务器 runtime `threadDisplay.paneThreadIds`；
+  后续刷新、多设备打开和 Home AI/PWA 更新会保留这个新槽位顺序。
+- 普通线程列表 recent 排序、后台状态刷新和 tile detail 刷新仍只能补空位，不能自动
+  重排既有 pane。
+- PWA shell cache 升级到 `codex-mobile-shell-v424`。
+
+v423 调整平铺窗口数入口：
+
+- 取消平铺 board 右上角的浮动 `− / +` 控件，避免遮挡 pane 内容。
+- 点击 pane 线程名打开线程列表时，菜单顶部显示 `关闭窗口`、当前窗口数和 `新增窗口`。
+- `关闭窗口` 针对当前 pane：减少可见 pane 数并从当前 slot 顺序中移除该线程；`新增窗口`
+  仍按已保存 slot 和最近线程补入下一个候选线程。
+- PWA shell cache 升级到 `codex-mobile-shell-v423`。
+
+v422 修正平铺窗口数的状态模型：
+
+- `threadDisplay` 新增 `paneCount`。`0` 表示自动：按当前线程、运行线程和设备容量保守显示；
+  正整数表示用户手动窗口数。
+- 平铺窗口数进入可持久化状态。减少窗口只减少当前显示数量，不删除 pane slot；
+  增加窗口会从已保存 slot 和最近线程里补入下一个候选线程。
+- 渲染列数跟随实际窗口数，而不是设备最大容量。四列设备显示两个窗口时使用两列，
+  保留更宽阅读空间；用户手动加到三/四个窗口时再切到三/四列。
+- PWA shell cache 升级到 `codex-mobile-shell-v422`。
+
+v421 修正平铺持久化、pane 稳定性和外层线程状态刷新：
+
+- `单线程` / `平铺` 显示模式、pane thread id 顺序和 selected pane 改为服务器
+  runtime `settings.json` 的 `threadDisplay` 字段，通过
+  `/api/settings/thread-display` 读写；浏览器 localStorage 只保留旧设置迁移和镜像。
+- pane 槽位一旦确定就按 thread id 固定。普通线程列表 recent 排序、后台列表刷新和
+  状态刷新只能填补空位，不能移动既有 pane；只有用户在线程名菜单里切换某个 pane
+  时才替换该槽位并保存。
+- 每台设备按当前宽度从同一服务器槽位列表里显示前 N 个 pane。iPad 可显示两/三栏，
+  更宽的 Android 平板横屏可显示四栏。
+- 后台 `turn/completed` 派生的 `thread/status/changed` 会携带 completion
+  `eventAtMs`，让 PR #78 吸收后的 freshness 策略能清掉真实完成线程的外层 running
+  hint，同时 replay completion 仍不会伪造新鲜时间。
+- 平铺 operation bubble 的耗时槽加宽并限制字体，Composer runtime 工具栏在大字体
+  设置下对 label/value 使用受控字号、`min-width: 0` 和 ellipsis，避免溢出卡片。
+- PWA shell cache 升级到 `codex-mobile-shell-v421`。
+
+v420 修正手机端右下浮动控件的归属和互斥规则：
+
+- `回到底部` 和 `回到本轮总结` 不再是两个可并存的横向按钮；它们复用同一右下浮动槽位，`回到底部` 条件满足时优先显示，避免截图中两个箭头同时出现。
+- `回到本轮总结` 的功能保留，仍然跳到当前 live/recent completed turn 的最终 `agentMessage`/`plan` 位置；它只在不需要 `回到底部` 且目标起点已经在 viewport 上方时出现。
+- operation bubble 的 500ms 最小可见和 recall dot 都只在当前 turn 仍是 live 时有效；turn 完成并进入最终回执/Usage 后不再保留旧 command/file/tool/search 入口。
+- PWA shell cache 升级到 `codex-mobile-shell-v420`。
+
+v419 修正 v418 上线后平铺模式点 Composer 时整体界面短暂下沉并整板重绘的问题：
+
+- tile 模式打开时，根节点会标记 `thread-tile-open`；Home AI embed 键盘打开期间不再把整个 `.app` 按 `--app-top` 向下平移，避免平铺视图整体下沉。
+- `threadTileLayout()` 在 Composer/键盘焦点期间复用进入键盘前的 viewport 和 Composer 高度基线，不把 `visualViewport.height` 的键盘收缩误判成 pane 列/行布局变化。
+- window/visualViewport resize 在 tile + 输入焦点期间只更新 viewport/composer CSS 变量和菜单位置，不再触发 `renderCurrentThread()` 整板重绘；普通 resize、orientation 和键盘关闭后的刷新仍保持原路径。
+- PWA shell cache 升级到 `codex-mobile-shell-v419`。
+
+v418 修正 v417 平铺模式里线程名菜单和共享 Composer runtime 工具栏的交互闭环：
+
+- 点击 pane 线程名后，菜单打开状态进入 tile render signature，并且 title pointer 事件直接触发 pane 级 patch，不再依赖整板重绘；可见结果是线程切换列表会立即出现。
+- tile pane 选中态、线程名菜单、后台 recent-detail 刷新和 operation bubble 更新优先走对应 pane 的局部 patch，保留该 pane 自己的 scroll 位置，避免整块平铺画面一起抖动。
+- 每个 pane 记录用户是否主动离开底部；如果没有上滑阅读，新内容、后台刷新和 operation 更新会像手机单窗口一样自动沉底。只有用户已经离开底部时才保留距底部位置。
+- operation bubble 的右侧耗时固定保留 `HH:MM:SS` 的 tabular 宽度，长命令只能压缩中间 summary，不能遮挡秒数。
+- 平铺模式不新增设置入口；继续复用现有 Composer runtime row。用户点哪个 pane，Fast、模型、推理强度、权限控件就绑定哪个 pane 的线程 draft/metadata；额度仍保留在同一全局工具栏位置显示，不做 pane-local 额度。
+- 切换 active pane 时会先保存上一个 pane 的 runtime draft，再恢复新 pane 的 thread-keyed draft；如果新 pane 没有 draft，就清掉上一个 pane 的 pending overrides，回到新线程自己的记录值，避免 Fast/推理/权限串线。
+- PWA shell cache 升级到 `codex-mobile-shell-v418`，已部署 Mac production，未推 public。
+
+v417 修正 v416 上线后的平铺细节回归：
+
+- pane 页眉的“本轮”状态不再自造文案，改为复用单窗口 `turn-timer` 的同源状态结构：`本轮 + 时间 + 思考/输出/运行/已结束`。
+- 点击 pane 线程名打开线程切换列表时，pane 的 pointerdown 选中逻辑不再提前重渲染吞掉 click；线程名菜单可正常打开，选择后只替换当前 pane。
+- 平铺模式顶部重新尊重系统/宿主安全区，避免顶到系统通知栏。
+- 触屏宽屏上的命令状态改为真正浮层冒泡，不再为命令框保留底部独立行；pane 内 operation bubble 也不再用额外底部 padding 预留空间。
+- PWA shell cache 升级到 `codex-mobile-shell-v417`。
+
+v416 继续压缩平铺 pane 的纵向占用，并补上 pane 内线程切换：
+
+- tile 模式下全局 topbar 不再显示 `平铺视图` 或线程计数；主内容区贴近顶部，只保留少量边距。
+- pane header 去掉路径、更新时间和 `打开` 按钮，改为“可点击线程名 + 本轮状态胶囊”。点击线程名会在当前 pane 内打开线程列表，当前 pane/可见 pane/运行中线程优先，选择后只替换这个 pane 的线程 slot，不进入单线程页。
+- tile turn 不再渲染每个 turn 底部的 Active/Completed 状态行，避免占用阅读空间。
+- 每个 pane 的 `↓` 按钮默认隐藏，只有用户上滑离开底部且该 pane 可滚动时才出现，行为向单窗口底部按钮靠拢。
+- PWA shell cache 升级到 `codex-mobile-shell-v416`。
+
+v415 继续把平铺 pane 推向“缩小版手机单线程窗口”：
+
+- tile 模式新增 active pane。用户触碰/聚焦某个 pane 后，底部共享 Composer 的发送、
+  草稿、Stop/引导状态、普通消息、任务卡命令和 ChatGPT Pro source thread 都绑定到该
+  pane；不会因为选中 pane 而重排平铺顺序。
+- tile 模式清空全局 live operation dock，避免 iPad 上出现跨全屏的一条命令框。每个 pane
+  自己渲染手机态 operation bubble/sheet，并保留 500ms 最小可见语义；展开/收起状态按
+  pane id 独立保存。
+- 全局页眉不再显示第一个线程标题，改为 `平铺视图`；每个 pane header 显示自己的标题、
+  路径/更新时间和 `本轮` 状态。tile 模式下全局 turn timer 隐藏，pane header 状态随 tick
+  更新。
+- 仍未完成完整 pane-local Composer：底部 Composer 视觉仍共享，但逻辑目标跟随 active
+  pane。下一阶段再拆每个 pane 内独立输入、附件、语音、审批和 interrupt runtime。
+
+v414 修正平铺 pane 的阅读位置和刷新语义：
+
+- 每个 tile pane 渲染后默认定位到底部；如果用户已经在某个 pane 里手动上滑，
+  后续刷新会保留该 pane 距离底部的位置，不强行打断阅读。
+- 每个 pane 右下角新增独立的 `↓` 按钮，直接回到该线程底部。pane 内容增加
+  `thread-tile-pane-content` 外层，短内容也按底部对齐，整体更接近“单线程页面缩小后
+  同时显示”的感觉。
+- 非当前线程 pane 不再是一次性 recent-detail 缓存：tile 模式记录当前可见 pane ids，
+  对非当前 pane 做受控后台刷新，并在相关 thread/turn/item 通知到达时触发受节流的
+  recent-detail 追新。当前 active thread 继续走原有 SSE/live poll。
+- pane 内独立输入、命令框和操作气泡当时仍记录为下一阶段真正分屏 runtime 目标。
+
+v413 修正 v412 后 iPad Pro 11 横屏仍完全不平铺的问题：
+
+- 根因不在 `public/thread-tile-layout.js` 的纯策略阈值，而在浏览器调用层传入的
+  sidebar 宽度。Home AI embed 线程详情页里，`.sidebar` 由 embed CSS 强制为
+  fixed/offscreen overlay；但 iPad 横屏又会命中 tablet split media，导致
+  `isMenuOverlayMode()` 返回 false。v412 因此把 offscreen 的 `100vw` sidebar 当成
+  真实左侧分栏扣掉，传给策略的可用宽度接近 0，最终返回 `insufficient-width`。
+- `threadTileLayout()` 现在只在 `splitPaneSidebarVisible()` 证明 sidebar 实际占布局空间
+  时才扣 sidebar 宽度；fixed/offscreen/sidebar overlay 不再参与可用宽度计算。
+- PWA shell cache 升级到 `codex-mobile-shell-v413`。
+
+v412 修正“设置里已选择平铺，但 iPad Pro 11 横屏仍不触发”的策略边界：
+
+- v411 的显式设置只表示用户允许平铺；真正是否进入平铺仍由
+  `public/thread-tile-layout.js` 按当前 iframe 可视宽高、方向和 sidebar 状态判断。
+  Home AI 嵌入态下，iPad 横屏的 CSS viewport 可能低于原来的 900px 阈值，导致
+  用户已经选了 `平铺` 但仍保持单线程。
+- `public/thread-tile-layout.js` 把 tablet 横屏入口阈值调整为 760px，并把 tablet
+  pane 最小宽度调整为 260px；820px 级嵌入横屏和 iPad Pro 11 横屏 sidebar split
+  后都按 3 栏目标计算。设置菜单的状态行会显示当前视口是 `平铺 N 栏`、宽度不足、
+  竖屏单线程，还是普通单线程。
+- 这仍是过渡形态：当前 tile panes 是只读 recent-detail 窗格，composer、审批、
+  interrupt 和 operation dock 仍只绑定当前 active thread。长期方向应升级成用户
+  可管理的分屏：用户添加/关闭 pane、拖拽 pane 宽度、决定显示几个线程；系统只做
+  性能上限和移动端可用性保护。
+
+本地 v411 将平铺入口从 topbar 移入设置菜单：
+
+- 设置菜单新增“显示”选择：`单线程` / `平铺`。默认没有持久化值时是单线程。
+- 平铺偏好改用 `codexMobileThreadDisplayMode=tile`；旧的
+  `codexMobileThreadTileMode` 会在新设置写入时清理，避免 v409 临时按钮状态影响新默认。
+- topbar 的 `▦` 平铺按钮移除，避免入口分散；宽屏/iPad 横屏选择“平铺”后仍按
+  `public/thread-tile-layout.js` 的能力策略渲染，不满足宽屏条件时保持单线程。
+
+本地 v410 修正 v409 平铺入口在 iPad/Home AI 嵌入视口下可能被隐藏的问题：
+
+- 平铺可用性不再依赖 sidebar split 的 `min-height: 600px` 和严格
+  `pointer: coarse` 组合。Home AI 嵌入模式下，iPad 横屏 iframe 的可视高度可能被
+  宿主 top/bottom UI 压到 600px 以下，iPadOS 也可能把 pointer 报成非 coarse；这两
+  种情况下仍应按横屏阅读宽度显示平铺入口。
+- `public/thread-tile-layout.js` 现在把横屏、900px 以上宽度、480px 以上高度作为
+  平铺入口的主要条件，并允许 overlay sidebar 模式下使用全宽阅读区。
+- 手机和 iPad 竖屏仍保持单线程；iPad/桌面宽屏的底部 command dock 仍保留一整条，
+  phone-only operation bubble 不扩展到 iPad。
+
+本地 v409 继续按上面的四层目标推进：
+
+- 宽屏线程阅读区新增只读多线程平铺：新增 `public/thread-tile-layout.js`
+  承担 viewport/sidebar/orientation 到 columns/rows/maxPanes 的纯策略。手机和
+  iPad 竖屏保持单线程；iPad 横屏按可用宽度至少给 2 栏，1366px 级横屏允许 3 栏；
+  桌面宽屏最多 4 列、2 行，并通过 `DEFAULT_MAX_PANES` 控制最大并发 detail 读取数。
+- `public/app.js` 只保留 DOM 编排：平铺 pane 使用 recent thread detail 只读渲染，
+  不复用完整 `renderTurn()`，避免把审批、草稿、composer 和当前线程运行态复制到
+  每个窗格。点击 pane 里的“打开”才切换为当前线程；composer、interrupt、operation
+  bubble/dock 仍只绑定当前 active thread。
+- 新增 `test/thread-tile-layout.test.js` 和 `test/thread-tile-layout-ui.test.js`
+  覆盖 desktop 多 pane、iPad 横/竖屏、current-thread 优先选择、shell policy 注入、
+  只读 tile rendering 和 CSS shell。PWA shell cache 升级到
+  `codex-mobile-shell-v409`。
+
+本地 v408 继续按上面的四层目标推进，但不执行第五步部署/发布：
+
+- 大 session 性能证据：线程详情响应现在附加
+  `mobileDiagnostics.threadDetailTimings`，包含 `summaryMs`、
+  `projectionMs`、`turnsListInitialMs`、`threadReadMs`、
+  `prepareResponseMs`、`readMode` 和 `phase`。前端
+  `thread_detail_first_paint`、`thread_refresh_ms`、
+  `thread_detail_full_ready`、`thread_list_rendered` 事件会带
+  `serverTimings` 和 `performancePhase`，用于区分 cold thread-read、
+  turns-list、warm projection cache 和 thread-list fallback cache。
+- `public/app.js` 继续拆边界：新增 `public/live-operation-dock-state.js`
+  承担 mobile operation bubble 的 500ms 最小滞留、expanded pinned sheet、
+  recall dot 是否显示等纯状态规则；`app.js` 只保留 DOM 查询、patch 和事件绑定。
+- 线程详情 item 合并的可见字段保留规则提取到
+  `public/thread-detail-state.js`；`app.js` 只创建 policy 并委托
+  `mergeItemPreservingVisibleFields`，不再内联 context compaction notice
+  清理和 operation 字段保留规则。
+- completed incoming turn 是否已有权威回执、local-only live receipt 是否应丢弃、
+  以及 local-only item 是否应保留的规则也进入 `public/thread-detail-state.js`。
+  这样 `app.js` 只负责按 incoming 顺序合并数组和 DOM patch，不继续拥有这些
+  状态判定。
+- 可见文本 item 的 render identity 判断、completed receipt 较长可见文本保留、
+  以及既有 id / startedAtMs 保留规则也进入 `public/thread-detail-state.js`。
+  `app.js` 继续只保留 `visibleTextItemsCanShareRenderIdentity` 和
+  `mergeVisibleTextItemPreservingRenderIdentity` 的委托 wrapper，数组合并编排仍留在
+  `app.js`，避免一次性移动 DOM patch 和 live merge 编排。
+- 线程列表/详情性能字段提取放入 `public/thread-performance-metrics.js`，
+  避免在 `app.js` 中继续散落 readMode/fallback cache 分类逻辑。
+- task-card store fail-closed 已在当前代码中确认：missing store 仍是首启空状态，
+  malformed JSON、wrong shape、unreadable store 都会 fail closed，不再静默当空。
+- runtime 明确完成但没有最终回复的 turn 现在不会在详情里静默消失，也不会被伪造成
+  assistant 回执。服务端从 rollout `task_complete` / `task_completed` 识别空
+  `last_agent_message`，给该 completed turn 附加 bounded `turnDiagnostic`
+  / `runtime_completed_without_response`；receipt-only 压缩会保留该诊断，前端以
+  诊断卡渲染。后续前端 incident 上报应复用已鉴权 Mobile Web 服务端，仅提交
+  build id、thread/turn id、read mode、状态、计数和耗时桶等 bounded 字段，再由
+  去重/限流后的任务卡闭环，不另开未鉴权监听端口。
+- 覆盖补强：新增 `test/thread-detail-performance-service.test.js`、
+  `test/thread-performance-metrics.test.js`、`test/live-operation-dock-state.test.js`、
+  `test/thread-detail-state.test.js`；
+  既有 `conversation-render` 覆盖上传图、generated image、protected image recovery、
+  任务卡折叠和 V4 merge，`collab-agent-render`/`mobile-viewport` 覆盖 operation dock
+  与 PWA shell 静态资产。
+
+## 近期逐版本记录
+
+- 中文说明：v424（已部署 Mac production，已同步 public）修正平铺固定 pane 遮挡偶发活跃线程的问题。平铺模式下，如果用户从外层线程列表主动进入一个当前不可见的线程，最后一个可见 pane 会被该线程替换，并保存到服务器 runtime `threadDisplay.paneThreadIds`；普通 recent 排序和后台刷新仍不能重排已固定 pane。PWA shell cache 升级到 `codex-mobile-shell-v424`。
+- 中文说明：v423（已并入 v424 Mac production，已同步 public）把平铺窗口增减入口移入 pane 线程名菜单。点击线程名打开列表后，顶部显示 `关闭窗口`、窗口数和 `新增窗口`；右上浮动 `− / +` 控件移除，避免遮挡 pane 内容。PWA shell cache 升级到 `codex-mobile-shell-v423`。
+- 中文说明：v422（已部署 Mac production，已同步 public）修正平铺窗口数。设备宽度决定最大容量，`threadDisplay.paneCount` 和窗口增减控件决定当前显示几个窗口；自动模式下不会因为设备可放 4 个就强制塞满 4 个，两个活动窗口会以两列宽 pane 显示。PWA shell cache 升级到 `codex-mobile-shell-v422`。
+- 中文说明：v421（已部署 Mac production，已同步 public）修正平铺显示设置和 pane 位置持久化。`单线程` / `平铺`、pane thread id 顺序和 selected pane 写入服务器 runtime `threadDisplay`，多设备和 Home AI/PWA 刷新后保持一致；线程列表 recent 排序只能补空位，不能重排已固定 pane，用户在线程名菜单切换 pane 才会保存新槽位。tablet 横屏按宽度最多可显示 4 栏。后台 completion 状态通知补 completion `eventAtMs`，避免详情已结束但外层列表仍显示刷新。平铺命令气泡耗时和 Composer runtime 工具栏大字体溢出也收窄。PWA shell cache 升级到 `codex-mobile-shell-v421`。
+- 中文说明：v420（已部署 Mac production，已同步 public）修正手机端右下浮动控件状态。`回到底部` 和 `回到本轮总结` 复用同一个右下槽位并互斥显示，`回到底部` 优先；operation bubble/recall 只在当前 turn live 时保留，turn 完成后不再显示旧命令入口。PWA shell cache 升级到 `codex-mobile-shell-v420`。
+- 中文说明：v419（已部署 Mac production，未推 public）修正平铺模式点 Composer 后整体界面下沉并整板重绘的问题。tile 打开时根节点标记 `thread-tile-open`，embed 键盘打开期间 `.app` 不再跟随 `--app-top` 平移；tile layout 在输入焦点期间复用键盘前的 viewport/composer 高度基线，visualViewport 键盘收缩不再改变 pane 列/行或触发 tile 退出；window/visualViewport resize 在 tile + 输入焦点期间不再调用整线程 `renderCurrentThread()`。PWA shell cache 升级到 `codex-mobile-shell-v419`。
+- 中文说明：v418（已部署 Mac production，未推 public）修正平铺模式线程名菜单、共享 Composer runtime 工具栏、pane 新内容沉底和命令气泡秒数遮挡。线程名菜单打开状态进入 tile render signature，title pointer 直接 pane-local patch，避免“点了没列表”；tile pane 选中、菜单、后台 detail 刷新和 operation bubble 更新优先局部 patch 对应 pane，未主动上滑时新内容自动沉底，抑制整屏抖动。平铺模式不新增设置入口，继续复用现有 Fast/模型/推理强度/权限/额度工具栏；用户点哪个 pane，Fast/模型/推理/权限就跟随哪个 pane 的 thread-keyed draft/metadata，额度仍是全局显示。operation bubble 耗时固定保留 `HH:MM:SS` 宽度，长命令不再遮挡秒数。PWA shell cache 升级到 `codex-mobile-shell-v418`。
+- 中文说明：v417（已部署 Mac production，未推 public）修正 v416 平铺细节：pane header 的本轮状态复用单窗口 `turn-timer` 结构，显示 `本轮 + 时间 + 思考/输出/运行/已结束`；线程名点击不会被 pane pointerdown 重渲染吞掉，能正常打开线程切换列表；平铺顶部尊重系统/宿主安全区；触屏宽屏命令状态使用浮层冒泡，不再占底部独立行。PWA shell cache 升级到 `codex-mobile-shell-v417`。
+- 中文说明：v416（已部署 Mac production，未推 public）压缩平铺模式顶部和 pane 内冗余状态。tile 全局 topbar 不再显示 `平铺视图`，pane header 去掉路径/更新时间/打开按钮，改为可点击线程名和紧凑本轮状态胶囊；点击线程名可在当前 pane 内打开线程列表并替换该 pane 的线程 slot。tile turn 底部不再显示 Active/Completed 状态行；每个 pane 的 `↓` 只在上滑离开底部时显示。PWA shell cache 升级到 `codex-mobile-shell-v416`。
+- 中文说明：v415（已部署 Mac production，未推 public）把平铺模式的交互目标从“只读 recent-detail 窗格”推进到 active pane。用户触碰/聚焦哪个 pane，底部共享 Composer 就向哪个线程发送；草稿 key、Stop/引导状态、普通消息、任务卡命令、ChatGPT Pro source thread、本地 optimistic 回显和失败回执都按 active pane 的 thread id 归属。tile 模式清空全局 live operation dock，每个 pane 内复用手机态 operation bubble/sheet，展开状态按 pane 独立保存，并保留 500ms 最小可见语义。全局页眉不再显示第一个线程，pane header 自己显示标题、路径/更新时间和本轮状态。PWA shell cache 升级到 `codex-mobile-shell-v415`。
+- 中文说明：v414（已部署 Mac production，未推 public）修正平铺 pane 默认停在顶部、缺少直接向下箭头、非当前 pane 不实时追新的问题。tile pane 渲染后默认落到底部，短内容也底部对齐；每个 pane 有独立 `↓` 底部按钮；用户手动上滑后刷新会保留距底部位置。非当前 pane 改为受控后台 recent-detail 刷新，并在相关通知到达时触发受节流追新。pane 内独立输入、命令框和 operation bubble/dock 记录为下一阶段真正分屏 runtime：每个 pane 都应是独立手机单线程窗口，不混入当前只读 tile 热修。PWA shell cache 升级到 `codex-mobile-shell-v414`。
+- 中文说明：v413（已部署 Mac production，未推 public）修正 v412 后 iPad Pro 11 / Home AI embed 横屏仍完全不平铺的问题。根因是 embed 线程详情页的 sidebar 实际是 fixed/offscreen overlay，但 iPad 横屏命中 tablet split media 后 `isMenuOverlayMode()` 返回 false，调用层把 offscreen `100vw` sidebar 当成真实分栏宽度扣掉，导致可用宽度接近 0。`threadTileLayout()` 现在只在 `splitPaneSidebarVisible()` 证明 sidebar 实际占布局空间时才扣 sidebar 宽度。PWA shell cache 升级到 `codex-mobile-shell-v413`。
+- 中文说明：v412（已部署 Mac production，未推 public）修正 iPad Pro 11 / Home AI 嵌入横屏已选择 `平铺` 但仍显示单线程的问题。`public/thread-tile-layout.js` 将 tablet 横屏入口阈值降到 760px，tablet pane 最小宽度降到 260px，覆盖 820px 级嵌入横屏和 iPad Pro 11 横屏 sidebar split 后 3 栏目标；设置菜单新增当前视口状态说明。长期方向已记录为用户可添加、关闭、拖拽宽度的分屏阅读，而不是继续扩大自动平铺判断。PWA shell cache 升级到 `codex-mobile-shell-v412`。
+- 中文说明：v411（已部署 Mac production，未推 public）将平铺功能入口移到设置菜单的“显示”选择里。默认不平铺；只有用户选择 `平铺` 后才持久化 `codexMobileThreadDisplayMode=tile`。旧的 `codexMobileThreadTileMode` 会在新设置写入时清理，topbar 的 `▦` 临时按钮移除。PWA shell cache 升级到 `codex-mobile-shell-v411`。
+- 中文说明：v410（已部署 Mac production，未推 public）修正 iPad/Home AI 嵌入视口下平铺入口可能不显示的问题。v409 把入口和 iPad 横屏判断间接绑到了 sidebar split 的 `min-height: 600px` 以及 `pointer: coarse`；在 Home AI iframe 高度被宿主 UI 压缩或 iPadOS 报成非 coarse pointer 时，按钮会被隐藏。`public/thread-tile-layout.js` 现在按横屏、900px 以上宽度、480px 以上高度和 overlay/full-width 可用性判断平铺入口，iPad 竖屏仍保持单线程。PWA shell cache 升级到 `codex-mobile-shell-v410`。
+- 中文说明：v409（已部署 Mac production，未推 public）新增宽屏线程阅读平铺。`public/thread-tile-layout.js` 拥有 viewport/sidebar/orientation 到 columns/rows/maxPanes 的纯策略；手机和 iPad 竖屏保持单线程，iPad 横屏至少 2 栏、宽横屏允许 3 栏，桌面宽屏最多 4 列/2 行并受最大 pane 数限制。`public/app.js` 只做只读 pane DOM 编排，composer、interrupt 和 operation dock 仍绑定当前线程，点击 pane 内“打开”才切换当前线程。PWA shell cache 升级到 `codex-mobile-shell-v409`。
+- 中文说明：v408（本地已验证，未部署，未推 public）继续第二阶段前端状态边界拆分。`visibleTextItemsCanShareRenderIdentity` 和 `mergeVisibleTextItemPreservingRenderIdentity` 的规则已并入 `public/thread-detail-state.js`，覆盖可见文本 render identity、completed receipt 较长文本保留、既有 id / startedAtMs 保留，以及身份不匹配时回落到普通 visible-field merge。`public/app.js` 继续只保留委托 wrapper。PWA shell cache 升级到 `codex-mobile-shell-v408`。
+- 中文说明：v407（已部署 Mac production，未推 public）继续第二阶段前端状态边界拆分。`completedIncomingTurnHasAuthoritativeReceipt`、`shouldDropLocalOnlyReceiptForIncomingTurn` 和 `shouldPreserveLocalOnlyItem` 的规则已并入 `public/thread-detail-state.js`，覆盖 completed incoming turn 权威回执、local-only live receipt 丢弃、mux user echo 保留、reasoning local-only item 拒绝和 visual receipt suppression。`public/app.js` 继续只保留委托 wrapper。PWA shell cache 升级到 `codex-mobile-shell-v407`。
+- 中文说明：v406（本地待部署，未推 public）开始第二阶段前端状态边界拆分。线程详情 item 合并的强可见内容保留、context compaction notice 去旧状态、operation 字段保留等规则移动到 `public/thread-detail-state.js`，`public/app.js` 只保留委托 wrapper。新增 `test/thread-detail-state.test.js`，并把新静态脚本接入 HTML、service worker、server build-id 资产列表和 `npm run check`。PWA shell cache 升级到 `codex-mobile-shell-v406`。
+- 中文说明：本地补充 runtime 空完成 turn 诊断（未部署，未推 public）。实测 Home AI 某 turn 的 rollout 只有 `task_started` / `task_complete`，且 `last_agent_message` 明确为空；生产详情因此显示 completed 但无正文、无 Usage。当前源码改为在这种形态下附加 `turnDiagnostic` / `runtime_completed_without_response`，不伪造 `agentMessage`，也不把它当普通完成 Push；前端渲染为可见诊断卡。前端自动 incident 闭环的方向已固化为复用已鉴权服务端、bounded 字段、诊断包 id、去重限流后再发任务卡。
+- 中文说明：v405（本地待部署，未推 public）新增大 session 首屏/刷新分层性能诊断。线程详情响应带 bounded `mobileDiagnostics.threadDetailTimings`，前端性能事件带 `serverTimings` 与 `performancePhase`，用于直接区分 cold `thread/read`、turns-list、warm projection cache、thread-list fallback cache 和 DOM render 成本。移动端 operation bubble 的 500ms 最小滞留、pinned sheet 和 recall dot 状态规则拆到 `public/live-operation-dock-state.js`；性能字段提取拆到 `public/thread-performance-metrics.js`。PWA shell cache 升级到 `codex-mobile-shell-v405`。
+- 中文说明：v404 统一移动端右下浮动控件的视觉栈。`回到底部` / `回到本轮总结` 按钮和 operation recall 点现在都使用 36px 尺寸、同一右边距和固定 6px 垂直间距；recall 点仍在滚动按钮下方，避免两个圆同时出现时一大一小、没有对齐。PWA shell cache 升级到 `codex-mobile-shell-v404`。
+- 中文说明：v403 在移动端 operation bubble 的 500ms 最小停留之后，继续保留一个同线程最近 operation 的常驻小圆点入口。它位于右下角滚动箭头附近但更低、更小，不参与消息流布局；点击圆点会重新打开最近 command/file/tool/search 的不透明详情 sheet，避免短操作结束后完全没有可点入口。PWA shell cache 升级到 `codex-mobile-shell-v403`。
+- 中文说明：v402 修正移动端 operation bubble 仍会闪一下的问题。v399 的 500ms 保护只在 DOM 上已经存在气泡时生效；短命令如果在同一轮刷新里先结束，后续状态可能在气泡落 DOM 前把 dock 清空。现在 dock 状态会保存同一线程最后一个 mobile bubble HTML 和最短可见截止时间，短操作结束后仍保持至少 500ms；到期刷新只更新 dock，不再调用整线程 `renderCurrentThread()`，减少 Composer 附近和上方消息区的联动闪动。PWA shell cache 升级到 `codex-mobile-shell-v402`。
+- 中文说明：v401 吸收 PR #78 中可取的线程状态 freshness 设计，但按当前架构重写为独立 `thread-status-hints` 策略模块。移动端线程列表现在记录已读时间、短期提交处理中状态和 mux replay 时间戳，避免断线重放的旧 completion 把正在运行提示清掉或制造错误未读点；本次不引入大 session deferred enrichment，避免用二次刷新掩盖服务端缓存/投影根因。PWA shell cache 升级到 `codex-mobile-shell-v401`。
+- 中文说明：v400 修正跨线程任务卡的来源线程标题，并收窄处理 CodeGraph 只读 MCP 授权。任务卡创建和注入时不再接受 `# Continuation Bootstrap Index` 这类续接 bootstrap 文本作为来源线程名，而是优先使用真实显示标题、Mobile session index 标题或 thread id；新注入正文同时包含 `Source thread id`，避免标题异常时只剩不可恢复文本。CodeGraph MCP 的只读 `codegraph_search/explore/node/callers` elicitation 会在服务端自动接受，不再显示给用户；其他 MCP server 或未知工具仍需显式处理。PWA shell cache 升级到 `codex-mobile-shell-v400`。
+- 中文说明：v399 调整跨线程任务卡注入消息的手机端显示语义。注入卡不再按普通用户消息显示 `You`，而是使用独立任务卡外观；卡片头部显示来源线程和任务目的，完整任务卡正文仍可展开查看。移动端 operation bubble 增加 500ms 最小可见时间，避免短命令只闪一下。PWA shell cache 升级到 `codex-mobile-shell-v399`。
+- 中文说明：v398 将注入到目标线程的跨线程任务卡用户消息改为默认折叠。长任务卡只在消息流里显示来源线程、任务目的和长度摘要，点击可展开，展开内容在卡片内部滚动并可再次收起，避免任务卡正文把后续回执和 Usage 淹没。PWA shell cache 升级到 `codex-mobile-shell-v398`。
+- 中文说明：v397 修正手机端 operation bubble 展开详情不稳定的问题。用户点开气泡后，详情 sheet 会进入 pinned 状态，即使当前 command/file/tool operation 很快完成、后续刷新只剩 reasoning/status，也会保留最后一条 operation 详情，直到用户下拉或再次收起；展开 sheet/card 改为不透明 panel 背景，避免底下对话内容透出影响阅读。PWA shell cache 升级到 `codex-mobile-shell-v397`。
+- 中文说明：v396 修复移动端发送用户消息后，思考过程中同一条用户消息可能出现两张相同卡片的问题。服务端 mux-local `userMessage` echo 和 pending steer echo 现在携带 `clientSubmissionId`；前端线程合并会用提交 id、本地 `local-user-*` id、确定性 `mux-user-*` id 后缀和内容签名收敛同一次提交，只保留优先级更高的 mux/durable 用户消息，同时保留用户后来真正重复发送的同文消息。PWA shell cache 升级到 `codex-mobile-shell-v396`。
+- 中文说明：server-only 修正同一工作区多个正常线程之间无法发任务卡的问题。`/api/threads/:sourceThreadId/task-cards` 现在把精确 `targetThreadId` / `targetThreadTitle` 视为线程身份，只要目标存在且未归档、未删除、非隐藏/子代理，就允许同 cwd 投递；不会再因为另一个同 cwd 线程更新时间更新而拒绝或改投。`targetCwd` / `targetWorkspace` 仍是模糊 workspace 目标，才会选择该 workspace 的当前可见线程。传入源线程自身会返回 `target_thread_self`，归档目标返回 `target_thread_archived`；本次不改变 PWA shell cache。
+- 中文说明：v395 将手机端底部 Command dock 改为悬浮 operation bubble。手机窄屏不再为纯 reasoning 或命令状态常驻占用一行纵向空间；只有真实 command/file/tool/search 正在运行时才在 composer 上方显示一个不参与布局的气泡，内容只保留操作类型、短摘要和运行时长。点击或上滑气泡会展开当前操作详情 sheet，可查看完整命令和参数。桌面和 iPad 宽屏继续保留原一行 Command dock。PWA shell cache 升级到 `codex-mobile-shell-v395`。
+
+- 中文说明：server-only 跟进修正 v394 后 Mac 上 Command 详情仍为空的问题。实测 `/api/threads/:id?mode=recent` 返回的 `commandExecution.command` 本身为空，失败层不是前端 dock 渲染，而是服务端 raw-operation fallback 只解析 rollout `function_call.arguments.command`，没有解析 Mac `exec_command` 常见的 `arguments.cmd`。现在服务端投影同时支持 `command`、`cmd`、`shellCommand`、`shell_command`，且支持 `arguments` 为对象或 JSON 字符串；本次不改变 PWA shell cache。
+
+- 中文说明：v394 调整 v393 的底部 dock 语义，并修复 Mac 上 Command 详情为空。底部 dock 仍会在 active turn 全程保留一行高度，避免 reasoning ↔ command/tool 阶段切换导致 composer 上方布局跳动；但 reasoning-only 阶段的 synthetic 占位行只显示 `Command` 空状态，不再显示 `思考`，避免和右上角 turn 状态重复。Command 详情提取现在同时支持 `item.command` 和 Mac/新协议常见的 `item.arguments` JSON 里的 `command`/`cmd`/`shellCommand` 字段；真实 command/tool/file 操作仍优先显示在 dock。compact dock 高度从 54px 降到 40px，内部卡片从 44px 降到 32px，只保留一行文字和少量边距。PWA shell cache 升级到 `codex-mobile-shell-v394`。
+
+- 中文说明：v393 恢复 active turn 期间底部状态行恒定。v392 后底部 live operation dock 只在最新 live turn 存在 active command/tool/search 项时渲染；当 turn 处于 reasoning-only “思考”阶段时 dock 会消失，进入命令阶段再出现，导致 composer 上方高度变化并可能造成剩余画面颤动。现在 latest live turn 没有 active operational item 时也会渲染 synthetic `liveTurnStatus` 行，显示 `思考`/`运行` 等 live activity label；真正的 command/tool 到来时仍优先显示对应操作项。PWA shell cache 升级到 `codex-mobile-shell-v393`。
 
 - 中文说明：v392 继续修正完成回执出现后的画面闪烁。v391 已处理同一 turn 内较短完成回执接管旧 receipt 节点，但 post-completion refresh 仍会因为 `mobileProjectionRevision` / `mobileVisibleItemKeys` 变化而绕过局部 patch，退回较大的 conversation/article patch。现在 refresh patch 判断改用只包含外壳可见因素的 `conversationPatchShellSignature`，并允许 latest turn 在完成态追加 Usage 或更新 receipt 时保留已有 item key 做局部 patch；只有删除、重排或外壳结构变化才回退完整渲染。PWA shell cache 升级到 `codex-mobile-shell-v392`。
 
@@ -59,7 +489,7 @@
 - 中文说明：server-only 二次修正后台 turn 已经启动但线程列表/详情摘要又被 `idle` 覆盖的问题。Mobile Web 自己发起的 `turn/start` 成功返回后，现在会记录 bounded 服务端 active overlay，并把它统一应用到 `/api/threads` 和 `/api/threads/:id` 的状态合成；后续 state-db/app-server 暂时返回 `idle` 时不会洗掉运行标志。overlay 会在收到 `turn/completed`、rollout 尾部出现 `task_complete`，或 TTL 到期时清理。仍会广播轻量 `thread/status/changed active`，覆盖普通消息、source-direct/自动任务卡注入、auto-recover、side-chat apply、continuation handoff/bootstrap 和新线程首 turn。本次不改变 PWA shell cache。
 - 中文说明：v375 缓解大线程打开期间的后台列表补拉卡顿。线程列表首屏仍可用 `fallback=defer` 快速返回，但完整 fallback rollout 扫描不再 800ms 后立即启动；前端现在把它作为可取消、可推迟的后台任务，等待线程详情首屏稳定、没有列表请求在跑、且没有 workspace/search 过滤时再补拉。这样 Music 这类 200MB rollout 线程在服务重启后不会因为后台列表恢复马上扫大文件而拖慢首屏。PWA shell cache 升级到 `codex-mobile-shell-v375`。
 - 中文说明：v374 修正首次打开已完成线程时 Usage 卡片可能缺失、退出再进才出现的问题。线程详情首屏如果命中较旧投影缓存，且最新 completed turn 已有最终回执但还没有 Usage，前端现在会立即启动已有的 bounded Usage backfill 刷新；后台刷新拿到 `turnUsageSummary` 后会在当前页面补出 Usage，不再依赖重新进入线程。PWA shell cache 升级到 `codex-mobile-shell-v374`。
-- 中文说明：server-only 收紧 source-thread 任务卡目标校验，防止动态工具或 fallback 脚本把卡发到旧线程/隐藏线程。`/api/threads/:sourceThreadId/task-cards` 现在只接受当前可见、非归档、非子代理的目标线程；同一 cwd/workspace 有多个线程时，只允许最新可见 canonical 线程。传入旧 date-suffixed 线程、只存在 rollout fallback 的线程或不可见 id 会返回 `stale_target_thread` / `target_thread_not_visible`，并带上当前可投递线程信息；服务端不会自动改投。本次不改变 PWA shell cache。
+- 中文说明：历史说明：曾经为防止动态工具或 fallback 脚本把任务卡发到旧线程/隐藏线程，source-thread 任务卡目标校验把同一 cwd/workspace 收敛到最新可见 canonical 线程。该规则已被后续同工作区多线程修正收窄；当前规则是 exact `targetThreadId` / `targetThreadTitle` 按线程身份投递，归档/删除/隐藏/子代理目标仍会被拒绝。
 - 中文说明：server-only 修正 `codex_mobile.delegate_to_thread` 动态工具响应仍被 app-server 判为无效的问题。mux 真实错误显示当前 app-server 需要 `result.success` 和 camelCase `result.contentItems[{ type:"inputText" }]`，不是 `content_items/input_text`；错误响应会返回 `success:false`。任务卡幂等 seed 继续使用显式 requestId 或 source/target/title/body/workflow 语义字段，避免模型重试重复发卡。本次不改变 PWA shell cache。
 - 中文说明：server-only 修正 `跨工作区委派` 写保护没有覆盖直接工具调用的问题。开启后，普通插件线程默认使用真实 `workspace-write`/managed profile 和 `approvalPolicy:on-request`，并把当前 `.git` 同时加入 sandbox writable roots，确保当前工作区源码、当前 `.git`、读取、MCP 和网络继续可用；如果 app-server 对当前 `.git` 或普通读写发出审批，Mobile Web 会自动允许；如果尝试 `apply_patch`、文件变更、写类 shell 或写类文件系统授权到其他已知源码根，会自动拒绝。Home AI 中央控制平面提供的 AI Ops、平台检查、视觉核验和 `deploy:macos` 脚本被识别为官方工具命令，可以从插件线程调用；但直接修改、提交 Home AI 源码仍会被拦截。旧的 `danger-full-access` approval-proxy-only 兼容模式仅在显式设置 `CODEX_MOBILE_WORKSPACE_DELEGATION_APPROVAL_PROXY_ONLY=1` 时启用。本次不改变 PWA shell cache。
 - 中文说明：v373 修正 Profile 切换到目标账号时，额度接口临时失败会让切换进度消失并停住的问题。目标 app-server 初始化成功后，`account/rateLimits/read` 的网络/服务端临时失败会降级为警告继续切换，只有明确的 401/token 失效才阻止切换；失败响应会把 requestId/progress 带回前端，Profile 行会保留“切换失败：原因”和失败阶段，不再几秒后清空。PWA shell cache 升级到 `codex-mobile-shell-v373`。
@@ -72,9 +502,6 @@
 - 中文说明：历史说明：曾给 `跨工作区委派` 的运行时写入守卫增加受控维护豁免。当时普通插件线程会被收敛到当前 cwd 的 `workspace-write` / `approvalPolicy=never`；该默认实现后来因为会误伤当前工作区 `.git` 写入，短暂被“默认全权限 + 动态源码写保护”取代。当前默认已回到真实 sandbox，但改为 `approvalPolicy:on-request`，由 Mobile Web 自动允许当前工作区 `.git` 许可并拒绝外部源码写入。
 - 中文说明：历史说明：曾给 `跨工作区委派` 增加基于 approval proxy 的动态源码写保护。该版本只能拦截 app-server 审批请求，拦不住 `danger-full-access` 下的直接 `apply_patch` / shell 工具调用；当前版本改为默认真实 sandbox，approval proxy 只负责自动决策当前 `.git`、官方工具和外部源码写入审批。
 - 中文说明：server-only 收紧 `跨工作区委派` 的模型可见工具说明和审批语义。开关开启后，`codex_mobile.delegate_to_thread` 的描述明确要求：如果用户请求的实现、文件修改、命令、测试、部署或其他状态变更属于另一个工作区/线程，模型必须先调用该工具创建任务卡，不得在当前线程里直接 `cd`、读写、打补丁、运行命令或部署目标工作区。该动态工具路径固定创建 source-direct 卡，不允许模型把自由委派卡发成 Pending；Pending 仍保留给手动/API/MCP 等显式审批路径。仍保持“由模型判断是否跨工作区”，不恢复本地关键词/路径启发式预检。本次不改变 PWA shell cache。
-- 中文说明：v372 修正发送后短暂出现重复用户消息的问题。同一个 `clientSubmissionId` 的本地 optimistic 用户消息如果已经被 durable/mux 用户消息承接，会在跨 turn normalize 时被清掉，避免刷新前临时显示两条相同的 “You” 气泡；仍保留用户真实重复发送同一句话的情况。PWA shell cache 升级到 `codex-mobile-shell-v372`。
-- 中文说明：v371 修正 rename/title-only 更新误触发 unread dot 的问题。Unread dot 现在优先使用真实终态 turn 时间或 terminal status event 时间；用户已经看过的 session 不会再因为改名、preview 或 projection 刷新导致的通用 `updatedAt` 变新而被重新标未读。PWA shell cache 升级到 `codex-mobile-shell-v371`。
-- 中文说明：v370 修复移动端线程状态残留问题。线程列表 reconcile 或详情 merge 一旦看到真实 running/active 状态，会清掉对应 unread hint 并持久化，避免已进入新一轮处理的 session 仍显示“已完成未读”；submitted-processing hint 也只作为发送后到 assistant 接管前的短桥接窗口，详情已显示最新 turn 终态或桥接窗口过期时会清掉 running spinner。PWA shell cache 升级到 `codex-mobile-shell-v370`。
 - 中文说明：v369 修正 Android 折叠屏/嵌入态线程详情右上角运行状态框计时被裁剪的问题。`turn-timer` 不再用固定宽度压缩内部内容，计时段 `本轮 00:00:00` 改为不可收缩并保留完整显示，活动状态文字（思考/命令/输入等）在剩余空间内省略，避免秒个位被遮挡。PWA shell cache 升级到 `codex-mobile-shell-v369`。
 - 中文说明：v368 修正 Android APK/WebView 下 Composer 首次点击偶发不弹系统输入法、第二次点击后键盘虽出现但文字不上屏的问题。Codex Composer 仍使用 `contenteditable`，但 Android 上不再在 `pointerup/click` 后程序化 blur/refocus 抢 IME；如果发现输入框已假聚焦但键盘未打开，会在下一次 `pointerdown` 用户手势开始时先释放旧焦点，再交给 WebView 原生 tap 建立 editor connection。同时收窄 disabled 状态下保留 `contenteditable=true` 的条件，避免留下可编辑但 `aria-disabled/tabIndex` 冲突的混合状态。PWA shell cache 升级到 `codex-mobile-shell-v368`。
 - 中文说明：server-only 修复运行中线程投影回执被裁剪的问题。当最后一个 live turn 只是空壳，而前一个正在产出内容的 turn 尚未标记 completed 时，服务端会把这个有可见内容的 turn 也作为详细 turn 保留，避免只显示最后一条 assistant 回执、前面的中间回执被刷新掉。本次不改变 PWA shell cache。
@@ -106,6 +533,7 @@ Codex Mobile Web is a local web client for reading and controlling Codex session
 
 This repository does not contain Codex credentials, uploaded files, or a bundled Codex binary. Those are local runtime state on each machine.
 
+- 中文说明：v345 修复 Home AI 嵌入态 Codex 系统/助手图片输出仍停留白占位图的问题。嵌入 Home AI 时，上传图、生成图和文件预览图都通过已鉴权的同源代理 URL 直接渲染，不再只对用户上传图绕过透明占位图 hydration；独立访问仍保留受保护图片 hydration 兜底。PWA shell cache 升级到 `codex-mobile-shell-v345`。
 - 中文说明：v344 继续修正移动端左下角 Fast 按钮难点中的问题。Fast 按钮真实触控区从 28px 扩到 40px/42px，并补齐 pointer、click、touchend 三路去重兜底；Composer 控件区域继续优先于侧栏边缘手势，避免 Android WebView 和 iPhone 只能点到角落的问题。PWA shell cache 升级到 `codex-mobile-shell-v344`。
 - 中文说明：v343 修正移动端左下角 Fast 按钮难点中的问题。左侧边栏边缘滑动在 Composer 底部区域不再启动，Android 侧边栏手势起点也从 84px 收窄到 44px，避免 Fast 按钮和 Composer 控件被侧栏手势抢占；正文和列表左缘仍可用手势打开侧栏。PWA shell cache 升级到 `codex-mobile-shell-v343`。
 - 中文说明：v342 修正 Mobile 新建 Workspace 的默认父目录。未显式配置时，Mac 开发/生产仓库会优先使用当前仓库所在的 `HermesMobileDev` 开发根，不再默认落到用户 `Documents`；也可以用 `CODEX_MOBILE_WORKSPACE_DEFAULT_CREATE_ROOT` 指定默认父目录，用 `CODEX_MOBILE_WORKSPACE_CREATE_ROOTS` 限定可选父目录。创建对话框会在有多个允许父目录时显示选择框。PWA shell cache 升级到 `codex-mobile-shell-v342`。
@@ -461,12 +889,14 @@ app-server dynamic tool `codex_mobile.delegate_to_thread` into `thread/start`
 and `turn/start`. This is the model-visible path for ordinary Codex turns: the
 model decides whether a request needs another workspace/thread, calls the tool
 with an exact target thread id/title or exact target cwd, and the server creates
-the task card through the same source-thread route. The dynamic tool response is
+the task card through the same source-thread route. Exact thread ids/titles are
+thread identity, so multiple normal threads may share one cwd; archived,
+deleted, hidden, subagent, or non-detail-readable targets are still rejected.
+`targetCwd` / `targetWorkspace` remain fuzzy workspace targets and choose a
+current visible thread for that workspace. The dynamic tool response is
 serialized as app-server dynamic-tool output, `result.content_items` with an
 `input_text` item, not MCP `content` text. Source-thread task-card creation only
-accepts current visible target threads. If several threads share the same cwd,
-the latest visible thread is the canonical target; stale/hidden/old-rollout ids
-are rejected with a bounded error instead of being silently auto-retargeted.
+accepts deliverable target threads and rejects self-cards explicitly.
 The same start/turn runtime guidance also includes a local script fallback for
 agents that do not see the dynamic tool. App-server dynamic tools may not appear
 in deferred discovery surfaces such as `tool_search`, so that absence is not

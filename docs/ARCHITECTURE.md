@@ -357,7 +357,18 @@ responses, private manifest dumps, or long logs.
 
 Thread list reads app-server `thread/list`, then filters archived/deleted/sub-agent/out-of-workspace rows using local visibility rules and SQLite fallback data. The browser's default thread-list refresh requests a 40-row page; raising this casually can make startup, foreground resume, and thread switching noticeably slower because the server may do more app-server and fallback work before returning even when only a small number of rows are visible. On cold startup, the browser may request `/api/threads?fallback=defer`; the server then returns the app-server list immediately with `mobileDeferredFallback=true`, skips the expensive state DB / rollout fallback scan for that first paint, but still applies the lightweight `session_index.jsonl` display-title hydration so renamed or continuation threads do not flash their initial app-server titles. The browser follows with a delayed and cancellable silent full list refresh, so historical/fallback rows are still merged after the initial usable list is visible; this refresh must wait until no thread detail request is in flight and no list request is already running, because cold rollout fallback may synchronously scan large rollout files. The client treats thread switching, live polling, Usage backfill, and full-detail backfill as detail requests for this gate. The server also tracks active `/api/threads/:id` detail responses; if an ordinary unfiltered list refresh reaches the server while detail is active, it returns a deferred app-server-only list with `mobileDeferredFallback=true` and `fallbackDeferredReason=active-thread-detail` instead of starting the expensive fallback scan. After the first complete fallback pass in a server process, the fallback cache is a process-lifetime baseline by default: it does not expire on a timer and its key does not include `state_5.sqlite`, `session_index.jsonl`, archived-index, or `sessions/` directory fingerprints. New-thread, status, title, and archive events update or remove the matching cached summary incrementally; app-server `thread/list` remains the authoritative live source merged on every request. On cold startup with a saved current thread, the browser sets `startupThreadOpenPending` before the first app-shell reveal and starts the saved-thread detail read in parallel with status/workspace/list refresh; the startup path should not wait for the list response before beginning the known thread detail read. Startup emits bounded `startup_stage` client events so the runtime log can separate public-config, status, workspace, list, detail, and render delays. Codex worktree cwd values under `%USERPROFILE%\.codex\worktrees\<id>\<repo>` are treated as visible when `<repo>` matches a known workspace basename, so temporary Codex worktree sessions do not disappear merely because their cwd differs from the primary workspace path. When app-server omits visible rows, the list merges state DB, live rollout-session, and session-index fallback threads before applying the same cwd/search filters. If a migrated macOS production instance has visible Mac workspace roots but all recovered thread cwd values are Windows paths, the All-workspaces fallback keeps non-archived non-sub-agent history visible instead of filtering the list to zero rows. Duplicate fallback rows are not discarded blindly: display fields can fill missing/stale app-server titles, and the newest `updatedAt` wins so active shared-state threads move in the sidebar after turns. The rollout-session fallback reads the head of `sessions/rollout-*.jsonl` files to recover thread id, cwd, timestamp, sub-agent metadata, and safe display names from `session_index.jsonl`, then reads a bounded tail to infer fallback `active` / `completed` status from safe event types such as `task_started` and `task_complete`. Final list merge re-applies archived/sub-agent filtering and drops non-live Mobile fallback summaries that still have no real display text after session-index hydration; this keeps completed child-agent or orphan rollout rows from appearing as unopenable UUID-only threads. Its fallback `updatedAt` uses the newest of session-index time, rollout head timestamps, and rollout file mtime, so shared-state turns that keep writing rollout data do not stay pinned to an old index timestamp. It exists so a malformed `state_5.sqlite` does not make all old threads disappear after an account/profile switch. The session-index fallback must also skip ids present in `archived_sessions`, profile-specific `archived_sessions`, and `%USERPROFILE%\.codex-mobile-web\archived-thread-ids.json`; the Mobile local index stores only thread ids and archived timestamps so re-archiving a recovered/old-profile row hides it even when app-server cannot mutate the original SQLite row. After an existing-thread message send succeeds, the browser schedules both current-detail refresh and a silent thread-list refresh; otherwise a usable thread can keep an old sidebar timestamp until a manual list reload or foreground resume. Running-thread sidebar/home indicators are driven by both row status and browser-local `runningThreadIds` hints. A list refresh that returns `notLoaded` must not immediately clear a known running hint, but the hint carries a browser-local timestamp and expires after a bounded stale window when the row still has no running or terminal status and the current thread has no active turn. Terminal statuses such as completed, failed, cancelled, error, or interrupted clear it immediately. Current-thread `turn/started` and `turn/completed` notifications also update the matching thread-list row and schedule a list repaint so the running indicator does not depend on a separate `thread/status/changed` notification.
 
+`adapters/thread-list-fallback-cache-service.js` owns the fallback cache policy: key construction from visible workspace roots/projectless thread ids, process-lifetime default retention, optional TTL expiry, cache-hit diagnostics, first-run fallback aggregation, and incremental status/title/archive mutation. State-db, rollout-session, and session-index scanners remain separate providers injected by `server.js`.
+
+Browser thread-status freshness policy lives in `public/thread-status-hints.js`.
+It records local viewed times and short submitted-processing hints, and it uses
+event timestamps plus mux `mobileReplay` metadata before clearing running
+indicators or marking completed rows unread. A replayed old completion must not
+clear a newer running hint or create an unread marker simply because the
+notification was replayed after reconnect.
+
 Existing-thread send reconciliation treats the mutation response's real `turnId` as authoritative for the temporary submitted-message overlay. After `/api/threads/:id/messages` succeeds, the browser immediately moves any matching `local-turn-<clientSubmissionId>` user item into the returned server turn. That local overlay must not remain visible as a separate turn while the materialized server turn is also visible.
+
+`adapters/thread-detail-summary-service.js` owns the summary resolution phase for `/api/threads/:id`: state DB first, then started-thread cache, rollout-session fallback, and app-server lookup/refresh with bounded timing logs. It applies the local-active overlay before the route checks hidden-thread state or builds projection cache inputs, so immediate post-send detail refreshes do not wash active state back to idle.
 
 Background turn events remain content-scoped, but server-side `turn/started` / `turn/completed` notifications derive lightweight `thread/status/changed` summaries for all clients. Any successful Mobile Web-owned `turn/start` result for a visible user thread must also immediately broadcast an `active` `thread/status/changed` summary, update the local thread-detail projection cache, and record a bounded in-memory active-status overlay for list/detail summary synthesis. The overlay is required because the target thread may be in the background and the app-server/state-db summary can briefly continue to report `idle` even after `turn/start` returned. `/api/threads` and `/api/threads/:id` must apply that overlay after stale-active normalization so an immediate list/detail refresh cannot wash the running state back to idle. The overlay clears on raw `turn/completed`, a later rollout-tail terminal event such as `task_complete`, TTL expiry, or when rollout/detail projection evidence shows another materialized turn has become the real active turn. Local overlay turn ids are not authoritative once contradicted by materialized runtime state: if an empty local active shell coexists with a different unfinished turn that already has running items, server compaction transfers active ownership to the materialized turn and drops the empty shell; if the thread summary is already idle/completed/error-like, empty live shells are pruned from the detail projection. This local-start path covers normal existing-thread sends, source-direct or automatic task-card injection, auto-recover, side-chat apply, continuation source handoff/bootstrap, ChatGPT Pro bridge starts, and new-thread first turns. These summaries update the matching thread-list fallback cache row incrementally, so a silent list refresh does not need a full fallback rebuild to show running or terminal state.
 
@@ -381,13 +392,25 @@ one-per-turn, with the newest summary replacing older summaries. Cache
 signatures include the rollout size/mtime, summary updated time/status, the
 retained turn window, and the projection policy version; stale signatures miss,
 while live in-memory projection entries are accepted only when their
-notification timestamp is not older than the current summary. Dynamic
+notification timestamp is not older than the current summary.
+`adapters/thread-detail-projection-input-service.js` owns construction of the
+server-side signature input for detail reads; the projection cache service owns
+comparison, memory/disk storage, and miss/reseed behavior; and
+`adapters/thread-detail-projection-result-service.js` owns projection-hit result
+assembly before the route sends the detail response. That result assembly merges
+cached projection output with display summary data, session-index title
+hydration, state-db runtime fields, live-status normalization, public runtime
+settings, and projection read-mode metadata.
+`adapters/thread-detail-read-orchestration-service.js` owns the detail read
+phase order and timing aggregation for `/api/threads/:id`; `server.js` supplies
+the concrete app-server read, compaction, projection seed, fallback, and JSON
+transport adapters. Dynamic
 in-memory projection entries intentionally relax the full signature check while
 a thread is actively changing, but only for a bounded window: if the backing
 rollout path/size/mtime, retained turn window, or policy version changes after
 the seed and the thread is now resting, or the dynamic entry ages past the soft
 threshold without a new notification, the projection read must miss and reseed
-from detail. If projection misses, the route still prefers
+from detail. If projection misses, the read coordinator still prefers
 full app-server `thread/read includeTurns:true` regardless of rollout file size
 because bounded `thread/turns/list` does not reliably preserve the
 command/tool/file/search operation items expected in the Mobile detail view.
@@ -411,7 +434,7 @@ Production may switch to v4 after focused service/UI tests and visual
 verification pass; public release remains a separate public-safe validation and
 publish gate.
 
-The detail path compacts command/tool/file/search items, enriches item timestamps from rollout events, injects pending steer echoes when needed, and may attach a raw operation fallback only when it belongs to the same latest live turn. The current live turn keeps all compact process cards, and the previous ended turn also keeps those intermediate cards so the user can scroll back to inspect a just-finished step. If no live turn exists, the latest ended turn keeps compact process cards. Older-history pages and older turns outside that state-relevant set are receipt-only, retaining user question items, the last assistant/plan receipt item, and any `turnUsageSummary` metadata while omitting older assistant progress updates, process, reasoning, and operation cards. Completed raw fallback is accepted only while the latest turn is still live and the operation has a matching latest turn id; old completed operations must not attach to newer live turns. If app-server `thread/turns/list` omits the latest completed turn even though the thread summary and rollout `task_complete` point to it, server compaction appends a synthetic completed turn from the rollout completion event before trimming the recent window. The rollout enrichment index treats an EOF carry as visible only when it is a complete parseable JSON object; incomplete final fragments stay invisible, but a valid final `task_complete` line does not require a trailing newline before it can repair first-open detail. If a completed turn lacks an assistant/plan item whose text matches rollout `task_complete.last_agent_message`, detail enrichment inserts a synthetic final receipt before Usage so stale projections that still contain intermediate agent messages cannot cover the real final receipt on first open. Existing matching assistant/plan receipts are never replaced by this fallback, and failed, cancelled, interrupted, active, or otherwise incomplete turns are not backfilled. The usage summary is diagnostic UI only for successfully completed turns: turn-level token use, cumulative token use, model context-window percentage/risk, rollout size, and current workspace `PROJECT_CONTEXT.md` / `HANDOFF.md` sizes. `interrupted`, failed, cancelled, active, or otherwise incomplete turns do not render a Usage card even when their rollout contains `token_count` events, because that would imply a final receipt exists. Turn-level use is derived from cumulative `total_token_usage` deltas across all valid scoped token events in the turn, so multi-call turns are not reduced to the final model call. The usage row's `in` value displays uncached input when cached input is reported; context-window usage still uses raw input tokens from the final valid event. If app-server emits a final zero/window sentinel token event after valid usage, Mobile Web ignores that sentinel and keeps the latest valid scoped token event. Usage collection starts with the bounded rollout tail for speed, but thread detail also passes the currently returned turn ids into the collector. If any target turn is missing from the tail result and the rollout is within the runtime scan limit, the server scans the rollout file and caches only token summaries so recent completed turns do not lose Usage when later output pushes their `token_count` events out of the tail window. If rollout or workspace context sizes cross continuation thresholds, the Usage block may show the same `压缩续接` action used by the top warning.
+The detail path compacts command/tool/file/search items, enriches item timestamps from rollout events, injects pending steer echoes when needed, and may attach a raw operation fallback only when it belongs to the same latest live turn. The current live turn keeps all compact process cards, and the previous ended turn also keeps those intermediate cards so the user can scroll back to inspect a just-finished step. If no live turn exists, the latest ended turn keeps compact process cards. Older-history pages and older turns outside that state-relevant set are receipt-only, retaining user question items, the last assistant/plan receipt item, and any `turnUsageSummary` metadata while omitting older assistant progress updates, process, reasoning, and operation cards. The pure selection rules for operation-retaining turns and receipt-only item indexes live in `adapters/thread-turn-compaction-policy-service.js`; `server.js` composes those rules with rollout, image, Usage, and stale-active enrichment. Completed raw fallback is accepted only while the latest turn is still live and the operation has a matching latest turn id; old completed operations must not attach to newer live turns. If app-server `thread/turns/list` omits the latest completed turn even though the thread summary and rollout `task_complete` point to it, server compaction appends a synthetic completed turn from the rollout completion event before trimming the recent window. The rollout enrichment index treats an EOF carry as visible only when it is a complete parseable JSON object; incomplete final fragments stay invisible, but a valid final `task_complete` line does not require a trailing newline before it can repair first-open detail. If a completed turn lacks an assistant/plan item whose text matches rollout `task_complete.last_agent_message`, detail enrichment inserts a synthetic final receipt before Usage so stale projections that still contain intermediate agent messages cannot cover the real final receipt on first open. Existing matching assistant/plan receipts are never replaced by this fallback, and failed, cancelled, interrupted, active, or otherwise incomplete turns are not backfilled. The usage summary is diagnostic UI only for successfully completed turns: turn-level token use, cumulative token use, model context-window percentage/risk, rollout size, and current workspace `PROJECT_CONTEXT.md` / `HANDOFF.md` sizes. `interrupted`, failed, cancelled, active, or otherwise incomplete turns do not render a Usage card even when their rollout contains `token_count` events, because that would imply a final receipt exists. Turn-level use is derived from cumulative `total_token_usage` deltas across all valid scoped token events in the turn, so multi-call turns are not reduced to the final model call. The usage row's `in` value displays uncached input when cached input is reported; context-window usage still uses raw input tokens from the final valid event. If app-server emits a final zero/window sentinel token event after valid usage, Mobile Web ignores that sentinel and keeps the latest valid scoped token event. Usage collection starts with the bounded rollout tail for speed, but thread detail also passes the currently returned turn ids into the collector. If any target turn is missing from the tail result and the rollout is within the runtime scan limit, the server scans the rollout file and caches only token summaries so recent completed turns do not lose Usage when later output pushes their `token_count` events out of the tail window. If rollout or workspace context sizes cross continuation thresholds, the Usage block may show the same `压缩续接` action used by the top warning.
 
 `HANDOFF.md` has a separate 200KB Usage prompt threshold so recently compacted handoffs near 100KB do not immediately ask for another continuation.
 
@@ -475,6 +498,10 @@ evidence.
 Server-side handling of `item/tool/call` resolves the source thread from
 app-server metadata or the recent turn/thread map, resolves the target by exact
 thread id/title/cwd, and then calls the same source-thread task-card helper.
+Target parsing, visible-thread filtering, archived/hidden/subagent/sidecar
+rejection, same-cwd canonical selection, and public target metadata shaping are
+owned by `adapters/thread-task-card-routing-service.js`; `server.js` keeps only
+the HTTP/app-server composition wrappers for those rules.
 This app-server dynamic-tool path is only for Codex app-server turns. Codex
 Mobile also registers a standard `codex_mobile` MCP server into each active or
 target Codex Home during startup, workspace creation, and profile switching.
@@ -559,11 +586,34 @@ completion of the injected target turn and creates one
 reverse-direction auto-return card with the final receipt. That return card
 reuses the same workflow id and auto-injects back into the source thread through
 the active grant.
+### Thread Detail Performance Diagnostics
+
+Thread detail reads expose bounded timing metadata under
+`thread.mobileDiagnostics.threadDetailTimings`. This diagnostic payload is for
+root-cause performance analysis only; it must not copy user messages, prompts,
+tool output, upload paths, provider payloads, or rollout bodies. The stable
+fields include `requestMode`, `readMode`, `phase`, `summarySource`, `totalMs`,
+`summaryMs`, `projectionMs`, `turnsListInitialMs`, `threadReadMs`,
+`rawThreadReadMs`, `turnsListFallbackMs`, `prepareResponseMs`,
+`returnedTurns`, `omittedTurns`, and `rolloutSizeBytes`.
+
+The browser forwards those fields through `/api/client-events` as
+`thread_detail_first_paint.serverTimings`, `thread_refresh_ms.serverTimings`,
+and `thread_detail_full_ready.serverTimings`, plus a compact
+`performancePhase`. Thread-list events similarly report `serverTimings` and a
+phase for fallback cache hits versus cold fallback rebuilds. This is an
+evidence path, not a content strategy: large-session first paint must still
+return the current authoritative detail/projection state rather than showing an
+intentionally incomplete page and relying on a second refresh to hide the
+missing data.
+
 ### Conversation Navigation
 
 The browser owns conversation scroll controls. The return-to-bottom button appears only when the current thread is loaded, scrollable, and away from the newest content.
 
-The upward floating button for the current live or recently completed turn is a summary/receipt jump, not a start-of-answer jump. A real upward user scroll can activate the anchor while a turn is live, and `turn/completed` also creates a completion anchor so a user who has already reached the bottom can still jump back to the beginning of the final receipt. Clicking the button should scroll to the last `agentMessage` or `plan` item in that turn. If no such final receipt exists, it falls back to the last non-user, non-live-operation, non-Usage item, then to the turn container. Tapping the down-arrow to skip to the bottom must not clear the completion anchor; the anchor clears on a new turn, expiry, thread change, or after the user taps the upward receipt-jump button. Visibility is based on the target item's start being above the viewport, not on the whole target item being above the viewport, because final summaries can be tall.
+The upward floating button for the current live or recently completed turn is a summary/receipt jump, not a start-of-answer jump. It shares the same floating slot as the return-to-bottom button and must not appear at the same time; return-to-bottom wins when both predicates are true. A real upward user scroll can activate the anchor while a turn is live, and `turn/completed` also creates a completion anchor so a user who has already reached the bottom can still jump back to the beginning of the final receipt. Clicking the button should scroll to the last `agentMessage` or `plan` item in that turn. If no such final receipt exists, it falls back to the last non-user, non-live-operation, non-Usage item, then to the turn container. Tapping the down-arrow to skip to the bottom must not clear the completion anchor; the anchor clears on a new turn, expiry, thread change, or after the user taps the upward receipt-jump button. Visibility is based on the target item's start being above the viewport, not on the whole target item being above the viewport, because final summaries can be tall.
+
+Mobile operation bubbles are live-turn controls. The compact bubble may stay visible for the 500ms minimum dwell while the turn is still live, and the recall dot may reopen the current live turn's latest command/file/tool/search sheet. Once the turn completes and the final receipt/Usage surface is shown, the old operation bubble or recall dot must not remain as a command entry.
 
 Live and final receipt rendering must respect reading position. Once recent manual scroll intent moves the conversation away from the bottom, Mobile Web creates a current-turn auto-scroll hold even if a programmatic bottom-scroll window is active. While that hold is active, render-time stick-to-bottom, submitted-message follow, and viewport follow should not scroll down. The hold clears when the conversation returns to bottom or the user explicitly taps the down-arrow button. Plain live chat replies may continue streaming, but a latest live `agentMessage` in a turn that already has command/file/tool/search operation items is treated as a final receipt: the client stores deltas without repainting the card, then renders the receipt once on `turn/completed`. If the final receipt is long, the completion render scrolls to the start of that receipt instead of the bottom so the user can read downward or tap the down-arrow to skip it. If `turn/completed` arrives with a short completion payload and the full deferred receipt is only restored by the follow-up thread refresh, the completion anchor remains pending and the refresh render performs the same one-time receipt-start positioning.
 
@@ -600,12 +650,45 @@ Browser-selected model, reasoning effort, permission mode, and the Fast tag are
 persisted in the browser draft store by thread/workspace key even when the
 composer text is empty. Reopening the app or switching away and back should
 restore that runtime selection for the current target only; Fast is not a global
-browser flag. Once an existing-thread non-steering send succeeds, Mobile Web
-clears only text and attachments, then writes the runtime-only draft back under
-the thread key. New-thread send captures selected runtime values before creation
-and writes them back under the newly created thread key after the thread id is
-known. This avoids an immediate UI fallback to stale thread metadata while the
-new turn is starting and before app-server state DB metadata catches up.
+browser flag. In wide-screen tile mode, the existing Composer runtime row is
+not duplicated per pane; it follows the selected active pane exactly like the
+shared Composer target. Switching the active pane saves the previous pane's
+runtime draft, restores the new pane's thread-keyed draft, and clears stale
+pending runtime overrides when the new pane has no draft so controls fall back
+to that thread's own metadata. Quota remains a global display in the reused
+toolbar, not pane-local state. Once an existing-thread non-steering send
+succeeds, Mobile Web clears only text and attachments, then writes the
+runtime-only draft back under the thread key. New-thread send captures selected
+runtime values before creation and writes them back under the newly created
+thread key. In tile mode, Composer focus and keyboard visualViewport changes
+are not tile layout changes: the pane grid uses the pre-keyboard viewport and
+Composer-height baseline while a keyboard-editable input is focused, and
+visualViewport resize does not trigger a full thread render for the tile board.
+Home AI embedded tile mode also suppresses whole-app `--app-top` translation
+while the keyboard is open so the shared Composer can adapt without moving the
+entire pane grid. The display mode, desired pane count, and tile pane slot order
+are server-side runtime settings under `settings.json` `threadDisplay`, exposed
+through `GET/POST /api/settings/thread-display`; `localStorage` is only a legacy
+migration/cache mirror. `paneCount=0` means automatic sizing from current/running
+threads and viewport capacity; a positive value is the user's manual window
+count. Device width sets the maximum pane capacity only, so a four-pane-capable
+tablet can still display two wider panes until the user adds a window from the
+pane title menu. Pane slots are stable thread id positions: normal thread-list
+recent sorting can fill empty slots but must not reorder existing slots. A manual
+pane title-menu switch replaces only that slot and persists the new ordered pane
+id list. An explicit outer thread-list open is also treated as a user pane
+selection: when tile mode is active and the opened thread is not currently
+visible, the browser replaces the last visible pane slot with that thread and
+persists the new ordered pane id list. The title menu's `关闭窗口` / `新增窗口`
+actions change only how many slots are visible.
+
+Tile-mode pane refreshes are local by default. The browser keeps per-pane
+detail cache, operation bubble state, and scroll-bottom hold state keyed by
+thread id. Pane selection, title switch menus, background recent-detail refresh,
+and operation bubble changes should patch the affected pane only when pane ids
+and column layout are unchanged. A pane follows new content to the bottom unless
+the user has explicitly scrolled away from the bottom; in that case Mobile Web
+preserves distance from bottom until the user scrolls back down.
 
 The latest durable live turn must not be auto-interrupted only because it is quiet or ended with a completed operation/context marker. User guidance during a real latest live turn should steer that turn.
 
@@ -675,7 +758,9 @@ handler focuses an existing app shell and posts the target id, or opens the
 deep-link URL directly for cold-start/PWA launch so startup thread selection can
 load the matching thread without relying on a late `postMessage`.
 
-If the completion payload explicitly says the turn has no final assistant message, Mobile Web must not send a normal "turn ended" Push notification. That shape means the runtime ended the turn without a final reply, so treating it as a normal completed turn is misleading.
+If the completion payload explicitly says the turn has no final assistant message, Mobile Web must not send a normal "turn ended" Push notification. That shape means the runtime ended the turn without a final reply, so treating it as a normal completed turn is misleading. Thread detail projection should expose this as a bounded `turnDiagnostic` item with code `runtime_completed_without_response`; it must not fabricate an `agentMessage`, and receipt-only compaction must retain the diagnostic so the turn does not appear to silently vanish.
+
+Client-side incident reporting should reuse the authenticated Mobile Web server rather than opening a separate unauthenticated listener. Frontend diagnostics may POST bounded fields such as build id, thread id, turn id, read mode, status, render/scroll state, event source, item counts, and timing buckets. They must not include access keys, cookies, raw prompts, message bodies, image contents, full logs, or provider payloads. Any task-card closure built from these diagnostics should be deduplicated, rate-limited, and reference a diagnostic package id instead of embedding private evidence directly.
 
 When the Hermes plugin notification delegate is configured, turn-completed
 events are sent to Hermes Action Inbox/Web Push instead of Mobile Web's direct

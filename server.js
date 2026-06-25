@@ -62,6 +62,7 @@ const {
 } = require("./adapters/mobile-archive-index-service");
 const { createHermesPluginService } = require("./adapters/hermes-plugin-service");
 const { createThreadTaskCardService } = require("./adapters/thread-task-card-service");
+const { createThreadTaskCardRoutingService } = require("./adapters/thread-task-card-routing-service");
 const { createThreadSideChatService } = require("./adapters/thread-side-chat-service");
 const {
   continuationGoalMigrationPlan,
@@ -77,8 +78,16 @@ const {
 } = require("./adapters/codex-profile-service");
 const { ensureCodexMobileMcpServer } = require("./adapters/codex-mobile-mcp-config-service");
 const { ensureCodexProjectsTrusted } = require("./adapters/codex-project-trust-service");
+const { createThreadDetailProjectionInputService } = require("./adapters/thread-detail-projection-input-service");
+const { createThreadDetailProjectionResultService } = require("./adapters/thread-detail-projection-result-service");
 const { createThreadDetailProjectionService } = require("./adapters/thread-detail-projection-service");
 const { createThreadDetailProjectionV4Service } = require("./adapters/thread-detail-projection-v4-service");
+const { createThreadDetailSummaryService } = require("./adapters/thread-detail-summary-service");
+const { attachThreadDetailDiagnostics } = require("./adapters/thread-detail-performance-service");
+const { createThreadDetailReadOrchestrationService } = require("./adapters/thread-detail-read-orchestration-service");
+const { createThreadListFallbackCacheService } = require("./adapters/thread-list-fallback-cache-service");
+const { createThreadTurnCompactionPolicyService } = require("./adapters/thread-turn-compaction-policy-service");
+const { createThreadCompletionDiagnosticService } = require("./adapters/thread-completion-diagnostic-service");
 const { createChatGptProBridgeService } = require("./adapters/chatgpt-pro-bridge-service");
 const { createChatGptProPlannerService } = require("./adapters/chatgpt-pro-planner-service");
 const { createChatGptProMcpService } = require("./adapters/chatgpt-pro-mcp-service");
@@ -859,6 +868,10 @@ const MAX_STRUCTURED_CHARS = 24000;
 const MAX_DELTA_CHARS = 12000;
 const MAX_THREAD_TURNS = Math.max(1, Math.min(100, Number(process.env.CODEX_MOBILE_THREAD_TURNS || "10")));
 const MAX_FULL_THREAD_TURNS = Math.max(MAX_THREAD_TURNS, Math.min(200, Number(process.env.CODEX_MOBILE_FULL_THREAD_TURNS || "10")));
+const THREAD_DETAIL_TURNS_LIST_FIRST_BYTES = Math.max(
+  0,
+  Number(process.env.CODEX_MOBILE_THREAD_DETAIL_TURNS_LIST_FIRST_BYTES || String(8 * 1024 * 1024)),
+);
 const MAX_LIVE_OPERATION_ITEMS = Math.max(1, Math.min(30, Number(process.env.CODEX_MOBILE_LIVE_OPERATION_ITEMS || "12")));
 const OPERATIONAL_ITEM_TYPES = new Set(["commandExecution", "fileChange", "dynamicToolCall", "mcpToolCall"]);
 const THREAD_LIST_FALLBACK_CACHE_TTL_MS = Math.max(0, Number(process.env.CODEX_MOBILE_THREAD_LIST_FALLBACK_CACHE_TTL_MS || "0"));
@@ -914,10 +927,6 @@ const MAX_RUNTIME_CONTEXT_SCAN_BYTES = Math.max(MAX_ROLLOUT_CONTEXT_BYTES, Numbe
 const MAX_ROLLOUT_ENRICHMENT_CONTEXT_BYTES = Math.max(
   MAX_ROLLOUT_CONTEXT_BYTES,
   Number(process.env.CODEX_MOBILE_ROLLOUT_ENRICHMENT_CONTEXT_BYTES || String(32 * 1024 * 1024)),
-);
-const THREAD_DETAIL_DEFER_ENRICHMENT_BYTES = Math.max(
-  0,
-  Number(process.env.CODEX_MOBILE_THREAD_DETAIL_DEFER_ENRICHMENT_BYTES || String(16 * 1024 * 1024)),
 );
 const ROLLOUT_WARNING_BYTES = Math.max(1 * 1024 * 1024, Number(process.env.CODEX_MOBILE_ROLLOUT_WARNING_BYTES || String(200 * 1024 * 1024)));
 const ROLLOUT_ACTIVE_STATUS_WINDOW_MS = Math.max(60_000, Number(process.env.CODEX_MOBILE_ROLLOUT_ACTIVE_STATUS_WINDOW_MS || String(30 * 60 * 1000)));
@@ -1109,6 +1118,12 @@ const ACTIONABLE_SERVER_REQUEST_METHODS = new Set([
   ...ACTIONABLE_APPROVAL_METHODS,
   ...ACTIONABLE_USER_INPUT_METHODS,
 ]);
+const CODEGRAPH_READONLY_MCP_TOOLS = new Set([
+  "codegraph_search",
+  "codegraph_explore",
+  "codegraph_node",
+  "codegraph_callers",
+]);
 
 function optionListFromEnv(name, fallback) {
   const values = String(process.env[name] || "")
@@ -1150,7 +1165,12 @@ function appShellBuildId(cacheName = readServiceWorkerCacheName()) {
     "conversation-scroll.js",
     "image-compressor.js",
     "plugin-embed.js",
+    "plugin-voice-input.js",
     "build-refresh-policy.js",
+    "thread-performance-metrics.js",
+    "live-operation-dock-state.js",
+    "thread-detail-state.js",
+    "thread-tile-layout.js",
     "app.js",
     "sw.js",
     "manifest.json",
@@ -3259,7 +3279,7 @@ function isMeaningfulSupersededLiveItem(item) {
   if (isReasoningOnlyItem(item)) return false;
   if (isTurnUsageSummaryItem(item)) return false;
   if (isOperationalItem(item)) return false;
-  return isAssistantReceiptItem(item) || isVisualReceiptItem(item) || isContextCompactionType(item.type);
+  return isAssistantReceiptItem(item) || isVisualReceiptItem(item) || isTurnDiagnosticItem(item) || isContextCompactionType(item.type);
 }
 
 function pruneSupersededLiveShellTurns(thread) {
@@ -4675,6 +4695,34 @@ function readRolloutFinalReceiptItems(rolloutPath) {
   return cloneRolloutFinalReceiptPayload(payload);
 }
 
+let threadCompletionDiagnosticService = null;
+
+function getThreadCompletionDiagnosticService() {
+  if (!threadCompletionDiagnosticService) {
+    threadCompletionDiagnosticService = createThreadCompletionDiagnosticService({
+      fs,
+      cacheTtlMs: RUNTIME_CONTEXT_CACHE_TTL_MS,
+      cacheMaxEntries: RUNTIME_CONTEXT_CACHE_MAX,
+      cacheKeyForStat: runtimeContextCacheKey,
+      finalReceiptTextFromParams,
+      insertProjectedItemByTimestamp,
+      isAssistantReceiptItem,
+      isDiagnosticReceiptItem: isTurnDiagnosticItem,
+      readRolloutEnrichmentEntries,
+      rolloutCompletionTimestampMs,
+      rolloutEntryTurnId,
+      rolloutPathForThread,
+      stableTextHash,
+      visibleItemId,
+    });
+  }
+  return threadCompletionDiagnosticService;
+}
+
+function appendRolloutEmptyCompletionDiagnosticsToThread(thread) {
+  return getThreadCompletionDiagnosticService().appendEmptyCompletionDiagnosticsToThread(thread);
+}
+
 function appendRolloutFinalReceiptsToThread(thread) {
   if (!thread || typeof thread !== "object" || !Array.isArray(thread.turns) || !thread.turns.length) return thread;
   const rolloutPath = rolloutPathForThread(thread);
@@ -5050,52 +5098,79 @@ function annotateThreadRolloutStats(thread) {
   return out;
 }
 
-function threadDetailProjectionInput(threadId, summary) {
-  const rolloutPath = rolloutPathForThread(summary);
-  const rolloutStats = rolloutStatsForPath(rolloutPath);
-  if (!threadId || !rolloutPath || !rolloutStats) return null;
-  return {
+const threadDetailProjectionInputService = createThreadDetailProjectionInputService({
+  maxTurns: MAX_FULL_THREAD_TURNS,
+  rolloutStatsForPath,
+  statusText,
+  timestampToMs,
+});
+const threadDetailProjectionResultService = createThreadDetailProjectionResultService({
+  maxTurns: MAX_FULL_THREAD_TURNS,
+  compactThreadReadResult,
+  mergeThreadDisplaySummary,
+  applySessionIndexTitleToThread,
+  readSessionIndexEntries,
+  mergeThreadRuntimeFromStateDb,
+  normalizeThreadSummaryLiveStatus,
+  publicRuntimeSettings,
+});
+const threadDetailSummaryService = createThreadDetailSummaryService({
+  readStateDbThread,
+  readStartedThread,
+  readRolloutSessionFallbackThread,
+  readThreadSummaryFromAppServer,
+  mergeThreadDisplaySummary,
+  applyLocalActiveThreadStatusToSummary,
+  threadRolloutSizeBytes,
+});
+const threadDetailReadOrchestrationService = createThreadDetailReadOrchestrationService({
+  attachDiagnostics: attachThreadDetailDiagnostics,
+  resolveSummary: (requestCodex, threadId, options) => threadDetailSummaryService.resolveSummary(requestCodex, threadId, options),
+  resolveVisibility: () => visibilityFromGlobalState(readGlobalState()),
+  threadRuntimeSettings,
+  isHiddenThread,
+  rawAllEnabled: () => THREAD_DETAIL_RAW_ALL_ENABLED,
+  readRawThread: readRawThreadDetailForOrchestrator,
+  projectionInput: threadDetailProjectionInput,
+  projectedThreadResult: (input, summary, runtimeSettings) => prepareProjectedThreadReadResult(
+    threadDetailProjectionService.get(input),
+    summary,
+    runtimeSettings,
+  ),
+  rememberThreadSummary: (thread) => threadDisplaySummaryCache.remember(thread),
+  turnsListThreadReadResult: ({ threadId, summary, runtimeSettings, warning, mode, threadLog }) => turnsListThreadReadResult(
     threadId,
-    rolloutPath,
-    rolloutStats,
-    maxTurns: MAX_FULL_THREAD_TURNS,
-    summaryUpdatedAtMs: timestampToMs(summary && (summary.updatedAt || summary.updated_at || summary.updatedAtMs || summary.updated_at_ms)),
-    summaryStatus: statusText(summary && summary.status),
-  };
+    summary,
+    runtimeSettings,
+    warning,
+    mode,
+    threadLog,
+  ),
+  readFullThread: readFullThreadDetailForOrchestrator,
+  seedProjection: (input, result) => threadDetailProjectionService.seed(input, result),
+  preferBoundedReadBeforeFullRead: ({ projection }) => {
+    if (THREAD_DETAIL_TURNS_LIST_FIRST_BYTES <= 0 || !projection) return false;
+    const stats = projection.rolloutStats || {};
+    const sizeBytes = Number(stats.sizeBytes || stats.size || 0);
+    return Number.isFinite(sizeBytes) && sizeBytes >= THREAD_DETAIL_TURNS_LIST_FIRST_BYTES;
+  },
+  prepareResponse: prepareThreadDetailResponseResult,
+  fallbackThreadReadResult: fallbackThreadReadResultForOrchestrator,
+  isReadTimeoutError,
+  isUnmaterializedThreadError,
+  threadRolloutSizeBytes,
+  readTimeoutMs: READ_RPC_TIMEOUT_MS,
+  threadDetailRpcTimeoutMs: THREAD_DETAIL_RPC_TIMEOUT_MS,
+  maxThreadTurns: MAX_THREAD_TURNS,
+  maxFullThreadTurns: MAX_FULL_THREAD_TURNS,
+});
+
+function threadDetailProjectionInput(threadId, summary) {
+  return threadDetailProjectionInputService.projectionInput(threadId, summary);
 }
 
-function prepareProjectedThreadReadResult(cached, summary, runtimeSettings, options = {}) {
-  if (!cached || !cached.result || !cached.result.thread) return null;
-  const mergedResult = Object.assign({}, cached.result, {
-    thread: mergeThreadDisplaySummary(cached.result.thread, summary) || cached.result.thread,
-  });
-  const result = compactThreadReadResult(mergedResult, {
-    maxTurns: MAX_FULL_THREAD_TURNS,
-    deferRolloutEnrichment: Boolean(options.deferRolloutEnrichment),
-  });
-  if (!result.thread) return null;
-  result.thread = applySessionIndexTitleToThread(result.thread, readSessionIndexEntries().get(result.thread.id));
-  result.thread = mergeThreadRuntimeFromStateDb(result.thread, summary);
-  result.thread = normalizeThreadSummaryLiveStatus(result.thread);
-  result.thread.runtimeSettings = publicRuntimeSettings(runtimeSettings);
-  if (options.deferRolloutEnrichment) {
-    result.thread.mobileDeferredEnrichment = true;
-    result.thread.mobileDeferredEnrichmentReason = String(options.deferRolloutEnrichmentReason || "large-rollout-first-paint");
-  }
-  const projectionVersion = String(cached.version || result.thread.mobileProjectionVersion || "");
-  const v4 = projectionVersion === "v4";
-  result.thread.mobileReadMode = cached.dynamic
-    ? (v4 ? "projection-v4-dynamic" : "projection-dynamic")
-    : (v4 ? "projection-v4-cache" : "projection-cache");
-  result.thread.mobileProjection = {
-    ...(result.thread.mobileProjection || {}),
-    source: cached.dynamic ? "dynamic" : "cache",
-    version: projectionVersion || result.thread.mobileProjectionVersion || "",
-    cachedAtMs: cached.cachedAtMs || null,
-    updatedAtMs: cached.updatedAtMs || cached.cachedAtMs || null,
-    ageMs: cached.updatedAtMs ? Math.max(0, Date.now() - cached.updatedAtMs) : null,
-  };
-  return result;
+function prepareProjectedThreadReadResult(cached, summary, runtimeSettings) {
+  return threadDetailProjectionResultService.prepareProjectedThreadReadResult(cached, summary, runtimeSettings);
 }
 
 function finalizeThreadDetailProjectionResult(result, details = {}) {
@@ -5539,9 +5614,22 @@ function commandFromRawPayload(payload) {
     return String(payload.parsed_cmd[0].cmd);
   }
   if (Array.isArray(payload.command)) return payload.command.join(" ");
+  if (payload.arguments && typeof payload.arguments === "object" && !Array.isArray(payload.arguments)) {
+    return String(payload.arguments.command
+      || payload.arguments.cmd
+      || payload.arguments.shellCommand
+      || payload.arguments.shell_command
+      || "");
+  }
   if (typeof payload.arguments === "string") {
     const parsed = parseJsonLine(payload.arguments);
-    if (parsed && parsed.command) return String(parsed.command);
+    if (parsed) {
+      return String(parsed.command
+        || parsed.cmd
+        || parsed.shellCommand
+        || parsed.shell_command
+        || "");
+    }
   }
   return "";
 }
@@ -5822,19 +5910,19 @@ function compactItem(item, options = {}) {
   return out;
 }
 
+const threadTurnCompactionPolicyService = createThreadTurnCompactionPolicyService({
+  isLiveTurn,
+  isCompletedStatus,
+  isOperationalItem,
+  isUserQuestionItem,
+  isAssistantReceiptItem,
+  isVisualReceiptItem,
+  isTurnUsageSummaryItem,
+  isDiagnosticReceiptItem: isTurnDiagnosticItem,
+});
+
 function trailingOperationIndexes(items, allowLiveOperation, maxOperations = 1) {
-  const indexes = new Set();
-  if (!allowLiveOperation || !Array.isArray(items)) return indexes;
-  const requestedLimit = Number(maxOperations || 1);
-  const limit = maxOperations === "all"
-    ? items.length
-    : Math.max(1, Math.min(50, Number.isFinite(requestedLimit) ? requestedLimit : 1));
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (!isOperationalItem(items[index])) continue;
-    indexes.add(index);
-    if (indexes.size >= limit) break;
-  }
-  return indexes;
+  return threadTurnCompactionPolicyService.trailingOperationIndexes(items, allowLiveOperation, maxOperations);
 }
 
 function isUserQuestionItem(item) {
@@ -5942,6 +6030,10 @@ function isAssistantReceiptItem(item) {
 
 function isTurnUsageSummaryItem(item) {
   return Boolean(item && typeof item === "object" && item.type === "turnUsageSummary");
+}
+
+function isTurnDiagnosticItem(item) {
+  return Boolean(item && typeof item === "object" && item.type === "turnDiagnostic");
 }
 
 function isVisualReceiptItem(item) {
@@ -6052,84 +6144,27 @@ function filterDuplicateUploadImageViewsInTurnItems(items, options = {}) {
 }
 
 function receiptOnlyItemIndexes(items) {
-  const indexes = new Set();
-  if (!Array.isArray(items)) return indexes;
-  let receiptIndex = -1;
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index];
-    if (isUserQuestionItem(item)) indexes.add(index);
-    if (isTurnUsageSummaryItem(item)) indexes.add(index);
-    if (isVisualReceiptItem(item)) indexes.add(index);
-    if (isAssistantReceiptItem(item)) receiptIndex = index;
-  }
-  if (receiptIndex >= 0) indexes.add(receiptIndex);
-  return indexes;
+  return threadTurnCompactionPolicyService.receiptOnlyItemIndexes(items);
 }
 
 function isEndedTurn(turn) {
-  if (!turn || typeof turn !== "object" || isLiveTurn(turn)) return false;
-  if (isCompletedStatus(turn.status)) return true;
-  return Boolean(turn.completedAt || turn.completed_at || turn.completedAtMs
-    || turn.endedAt || turn.ended_at || turn.finishedAt || turn.finished_at
-    || turn.durationMs || turn.duration_ms);
+  return threadTurnCompactionPolicyService.isEndedTurn(turn);
 }
 
 function findPreviousEndedTurnIndex(turns, startIndex) {
-  for (let index = Math.min(startIndex, turns.length - 1); index >= 0; index -= 1) {
-    if (isEndedTurn(turns[index])) return index;
-  }
-  for (let index = Math.min(startIndex, turns.length - 1); index >= 0; index -= 1) {
-    if (turns[index] && !isLiveTurn(turns[index])) return index;
-  }
-  return -1;
+  return threadTurnCompactionPolicyService.findPreviousEndedTurnIndex(turns, startIndex);
 }
 
 function turnHasVisibleDetailItems(turn) {
-  if (!turn || !Array.isArray(turn.items)) return false;
-  return turn.items.some((item) => isUserQuestionItem(item)
-    || isAssistantReceiptItem(item)
-    || isVisualReceiptItem(item)
-    || isOperationalItem(item)
-    || isTurnUsageSummaryItem(item));
+  return threadTurnCompactionPolicyService.turnHasVisibleDetailItems(turn);
 }
 
 function findPreviousVisibleNonLiveTurnIndex(turns, startIndex) {
-  for (let index = Math.min(startIndex, turns.length - 1); index >= 0; index -= 1) {
-    const turn = turns[index];
-    if (!turn || isLiveTurn(turn)) continue;
-    if (turnHasVisibleDetailItems(turn)) return index;
-  }
-  return -1;
+  return threadTurnCompactionPolicyService.findPreviousVisibleNonLiveTurnIndex(turns, startIndex);
 }
 
 function operationDetailTurnIndexes(turns) {
-  const indexes = new Set();
-  if (!Array.isArray(turns) || turns.length === 0) return indexes;
-  let latestLiveIndex = -1;
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
-    if (isLiveTurn(turns[index])) {
-      latestLiveIndex = index;
-      break;
-    }
-  }
-  if (latestLiveIndex >= 0) {
-    indexes.add(latestLiveIndex);
-    const previousVisibleIndex = findPreviousVisibleNonLiveTurnIndex(turns, latestLiveIndex - 1);
-    if (previousVisibleIndex >= 0) indexes.add(previousVisibleIndex);
-    const previousEndedIndex = findPreviousEndedTurnIndex(turns, latestLiveIndex - 1);
-    if (previousEndedIndex >= 0) indexes.add(previousEndedIndex);
-    return indexes;
-  }
-  const latestVisibleIndex = findPreviousVisibleNonLiveTurnIndex(turns, turns.length - 1);
-  if (latestVisibleIndex >= 0) {
-    indexes.add(latestVisibleIndex);
-    const latestEndedIndex = findPreviousEndedTurnIndex(turns, turns.length - 1);
-    if (latestEndedIndex >= 0) indexes.add(latestEndedIndex);
-    return indexes;
-  }
-  const latestEndedIndex = findPreviousEndedTurnIndex(turns, turns.length - 1);
-  indexes.add(latestEndedIndex >= 0 ? latestEndedIndex : turns.length - 1);
-  return indexes;
+  return threadTurnCompactionPolicyService.operationDetailTurnIndexes(turns);
 }
 
 function compactTurn(turn, options = {}) {
@@ -6184,7 +6219,6 @@ function compactThread(thread, options = {}) {
   const rolloutPath = rolloutPathForThread(out);
   const rolloutStats = rolloutStatsForPath(rolloutPath);
   const maxTurns = Math.max(1, Math.min(200, Number(options.maxTurns || MAX_THREAD_TURNS)));
-  const deferRolloutEnrichment = Boolean(options.deferRolloutEnrichment);
   if (Array.isArray(out.turns)) {
     pendingSteerEchoStore.injectIntoThread(out);
     reconcileThreadActiveTurnWithRolloutEvidence(out, options);
@@ -6197,26 +6231,19 @@ function compactThread(thread, options = {}) {
       out.turns = out.turns.slice(-maxTurns);
       out.mobileOlderTurnsCursor = olderTurnsCursorBeforeTurn(out.turns[0]);
     }
-    let toolOutputImagePayload = {
-      suppressedUploadViewImageCallIdsByTurn: new Map(),
-    };
-    if (!deferRolloutEnrichment) {
-      enrichThreadItemTimestampsFromRollout(out);
-      toolOutputImagePayload = readRolloutToolOutputImageItems(rolloutPath, {
-        threadId: out.id || out.threadId || "",
-      });
-      appendRolloutToolOutputImagesToThread(out, toolOutputImagePayload);
-      appendRolloutFinalReceiptsToThread(out);
-      attachTurnUsageSummaries(out, readRolloutTurnUsageSummaries(rolloutPath, {
-        targetTurnIds: out.turns.map((turn) => turn && turn.id).filter(Boolean),
-      }), {
-        rolloutStats,
-        workspaceContextStats: workspaceContextStatsForCwd(out.cwd),
-      });
-    } else {
-      out.mobileDeferredEnrichment = true;
-      out.mobileDeferredEnrichmentReason = out.mobileDeferredEnrichmentReason || "large-rollout-first-paint";
-    }
+    enrichThreadItemTimestampsFromRollout(out);
+    const toolOutputImagePayload = readRolloutToolOutputImageItems(rolloutPath, {
+      threadId: out.id || out.threadId || "",
+    });
+    appendRolloutToolOutputImagesToThread(out, toolOutputImagePayload);
+    appendRolloutFinalReceiptsToThread(out);
+    appendRolloutEmptyCompletionDiagnosticsToThread(out);
+    attachTurnUsageSummaries(out, readRolloutTurnUsageSummaries(rolloutPath, {
+      targetTurnIds: out.turns.map((turn) => turn && turn.id).filter(Boolean),
+    }), {
+      rolloutStats,
+      workspaceContextStats: workspaceContextStatsForCwd(out.cwd),
+    });
     const latestIndex = out.turns.length - 1;
     const liveLatest = out.turns[latestIndex];
     if (liveLatest && isLiveTurn(liveLatest)) {
@@ -6233,7 +6260,7 @@ function compactThread(thread, options = {}) {
         : new Set(),
     })).map(orderTurnItemsByDisplayTimestamp);
     const latest = out.turns[latestIndex];
-    if (!deferRolloutEnrichment && latest && isLiveTurn(latest) && Array.isArray(latest.items)
+    if (latest && isLiveTurn(latest) && Array.isArray(latest.items)
       && !latest.items.some((item) => isOperationalItem(item))) {
       const rawOperation = readLatestRawOperation(out, latest.id, { includeCompleted: true });
       if (rawOperation) latest.items.push(rawOperation);
@@ -6719,6 +6746,39 @@ function publicServerRequest(request) {
   };
 }
 
+function codeGraphMcpElicitationToolName(request) {
+  if (!request || request.method !== "mcpServer/elicitation/request") return "";
+  const params = request.params && typeof request.params === "object" ? request.params : {};
+  const candidates = [
+    params.serverName,
+    params.server_name,
+    params.server,
+    params.mcpServer,
+    params.mcp_server,
+    params.toolName,
+    params.tool_name,
+    params.name,
+    params.title,
+    params.message,
+    params.elicitation,
+    params.schema,
+  ];
+  const text = candidates.map((value) => (typeof value === "string" ? value : JSON.stringify(value || ""))).join("\n");
+  const explicitServer = [params.serverName, params.server_name, params.server, params.mcpServer, params.mcp_server]
+    .some((value) => /^codegraph$/i.test(String(value || "").trim()) || /\bcodegraph\b/i.test(String(value || "")));
+  const messageMentionsCodeGraphServer = /\bcodegraph\b[\s-]*(?:MCP\s+)?server\b/i.test(text);
+  if (!explicitServer && !messageMentionsCodeGraphServer) return "";
+  const quoted = /\bcodegraph MCP server\b[\s\S]*?\btool\s+["“]([^"”]+)["”]/i.exec(text);
+  const raw = quoted ? quoted[1] : ((/\b(codegraph_[a-z0-9_]+)\b/i.exec(text) || [])[1] || "");
+  const toolName = String(raw || "").trim();
+  return CODEGRAPH_READONLY_MCP_TOOLS.has(toolName) ? toolName : "";
+}
+
+function codeGraphReadOnlyMcpElicitationDecision(request) {
+  const toolName = codeGraphMcpElicitationToolName(request);
+  return toolName ? { action: "allow", toolName } : null;
+}
+
 function grantedPermissionsFromRequest(params = {}) {
   const permissions = params.permissions || {};
   const granted = {};
@@ -6876,6 +6936,98 @@ function writeRuntimeSettings(patch = {}) {
   return next;
 }
 
+const THREAD_DISPLAY_MAX_PANES = 12;
+
+function normalizeThreadDisplayThreadId(value) {
+  const text = String(value || "").trim();
+  if (!text || text.length > 220) return "";
+  return text;
+}
+
+function normalizeThreadDisplayPaneCount(value, fallback = 0) {
+  const parsed = Math.floor(Number(value));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(THREAD_DISPLAY_MAX_PANES, parsed));
+}
+
+function normalizeThreadDisplayMode(value, fallback = "single") {
+  const text = String(value || "").trim().toLowerCase();
+  if (text === "tile" || text === "tiles" || text === "tiled") return "tile";
+  if (text === "single" || text === "normal") return "single";
+  return fallback === "tile" ? "tile" : "single";
+}
+
+function normalizeThreadDisplaySettings(raw = {}, options = {}) {
+  const input = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const hasExplicitMode = Object.prototype.hasOwnProperty.call(input, "displayMode")
+    || Object.prototype.hasOwnProperty.call(input, "mode");
+  let displayMode = normalizeThreadDisplayMode(input.displayMode || input.mode, "single");
+  if (!hasExplicitMode && input.threadTileMode === true) displayMode = "tile";
+  if (!hasExplicitMode && input.threadTileMode === false) displayMode = "single";
+  const rawPaneIds = Array.isArray(input.paneThreadIds)
+    ? input.paneThreadIds
+    : Array.isArray(input.threadTilePinnedIds)
+      ? input.threadTilePinnedIds
+      : Array.isArray(input.threadIds)
+        ? input.threadIds
+        : [];
+  const paneThreadIds = uniqueStrings(rawPaneIds)
+    .map(normalizeThreadDisplayThreadId)
+    .filter(Boolean)
+    .slice(0, THREAD_DISPLAY_MAX_PANES);
+  const selectedThreadId = normalizeThreadDisplayThreadId(input.selectedThreadId);
+  const paneCount = normalizeThreadDisplayPaneCount(
+    Object.prototype.hasOwnProperty.call(input, "paneCount")
+      ? input.paneCount
+      : Object.prototype.hasOwnProperty.call(input, "threadTilePaneCount")
+        ? input.threadTilePaneCount
+        : input.tilePaneCount,
+    0,
+  );
+  const updatedAt = String(input.updatedAt || "").trim();
+  const updatedAtMs = timestampToMs(input.updatedAtMs || updatedAt);
+  return {
+    displayMode,
+    threadTileMode: displayMode === "tile",
+    paneThreadIds,
+    paneCount,
+    selectedThreadId,
+    updatedAt,
+    updatedAtMs,
+    source: options.source || "runtime",
+  };
+}
+
+function threadDisplayPublicSettings(settings = readRuntimeSettings()) {
+  const raw = settings && settings.threadDisplay && typeof settings.threadDisplay === "object" && !Array.isArray(settings.threadDisplay)
+    ? settings.threadDisplay
+    : null;
+  return normalizeThreadDisplaySettings(raw || {}, { source: raw ? "runtime" : "default" });
+}
+
+function setThreadDisplaySettings(patch = {}) {
+  const input = patch && patch.threadDisplay && typeof patch.threadDisplay === "object" && !Array.isArray(patch.threadDisplay)
+    ? patch.threadDisplay
+    : patch;
+  const current = threadDisplayPublicSettings();
+  const now = new Date();
+  const next = normalizeThreadDisplaySettings(Object.assign({}, current, input || {}, {
+    updatedAt: now.toISOString(),
+    updatedAtMs: now.getTime(),
+  }), { source: "runtime" });
+  writeRuntimeSettings({
+    threadDisplay: {
+      displayMode: next.displayMode,
+      paneThreadIds: next.paneThreadIds,
+      paneCount: next.paneCount,
+      selectedThreadId: next.selectedThreadId,
+      updatedAt: next.updatedAt,
+      updatedAtMs: next.updatedAtMs,
+    },
+  });
+  return threadDisplayPublicSettings(readRuntimeSettings());
+}
+
 function workspaceDelegationPublicSettings(settings = readRuntimeSettings()) {
   const raw = settings && settings.workspaceDelegation && typeof settings.workspaceDelegation === "object"
     ? settings.workspaceDelegation
@@ -6909,7 +7061,9 @@ function workspaceDelegationTargetHints() {
     return workspaceDelegationTargetHintsCache.text || "";
   }
   try {
-    const threads = threadTaskCardCanonicalVisibleTargets(threadTaskCardVisibleTargetThreads()).slice(0, 80);
+    const threads = [...threadTaskCardVisibleTargetThreads()]
+      .sort((a, b) => threadTaskCardTargetUpdatedAt(b) - threadTaskCardTargetUpdatedAt(a))
+      .slice(0, 80);
     const lines = [];
     for (const thread of threads) {
       if (!thread || lines.length >= 24) break;
@@ -6942,9 +7096,9 @@ function workspaceDelegationDynamicToolSpec() {
       "This dynamic tool always creates source-direct cards when workspace delegation is enabled; do not request target-side pending approval from this tool.",
       "Do not use this for ordinary discussion, read-only references that do not require target-workspace inspection, or work that clearly belongs in the current thread workspace.",
       "The model must decide from the user's request whether delegation is required; do not rely on local keyword or path heuristics.",
-      "Use only a current visible target from the hints. Stale, hidden, archived, old-rollout, or non-detail-readable targetThreadId values are rejected by the server.",
-      "When several threads share the same cwd/workspace, use the latest visible canonical thread for that cwd. Do not use older date-suffixed threads for new task cards.",
-      "Prefer an exact current targetThreadId from the hints. If only a target is named, pass an exact visible targetThreadTitle or targetWorkspace/cwd from the hints.",
+      "Use only a current non-archived target thread. Archived, deleted, hidden, subagent, or non-detail-readable targetThreadId values are rejected by the server.",
+      "Several normal threads may share the same cwd/workspace. Prefer an exact targetThreadId or exact targetThreadTitle for the intended thread; do not retarget only because another thread in the same cwd was updated more recently.",
+      "Use targetWorkspace/cwd only when the request intentionally names a workspace rather than a specific thread; cwd targeting chooses a current visible thread for that workspace.",
       targetHints ? `Visible target hints:\n${targetHints}` : "",
     ].filter(Boolean).join("\n\n"),
     inputSchema: {
@@ -8282,13 +8436,11 @@ function threadStatusChangedPayload(threadId, status, meta = {}) {
   };
   const source = String(meta.source || "").trim();
   const turnId = String(meta.turnId || "").trim();
-  const eventAtMs = timestampToMs(meta.eventAtMs || meta.eventAt || meta.timestampMs || meta.timestamp);
+  const eventAtMs = timestampToMs(meta.eventAtMs || meta.eventAt || meta.completedAtMs || meta.completedAt || meta.startedAtMs || meta.startedAt);
   if (source) params.source = source;
   if (turnId) params.turnId = turnId;
-  if (eventAtMs) {
-    params.eventAtMs = eventAtMs;
-    params.eventAt = new Date(eventAtMs).toISOString();
-  }
+  if (eventAtMs) params.eventAtMs = eventAtMs;
+  if (meta.mobileReplay) params.mobileReplay = true;
   return {
     type: "notification",
     method: "thread/status/changed",
@@ -8333,62 +8485,16 @@ function threadStatusChangedPayloadFromTurnNotification(payload) {
   const status = method === "turn/started"
     ? { type: "active" }
     : (turn.status || payload.params.status || { type: "completed" });
+  const eventAtMs = method === "turn/started"
+    ? timestampToMs(turn.startedAtMs || turn.startedAt || turn.createdAtMs || turn.createdAt || payload.params.startedAtMs || payload.params.startedAt)
+    : timestampToMs(turn.completedAtMs || turn.completedAt || turn.finishedAtMs || turn.finishedAt || turn.updatedAtMs || turn.updatedAt || payload.params.completedAtMs || payload.params.completedAt || payload.params.finishedAtMs || payload.params.finishedAt || payload.params.updatedAtMs || payload.params.updatedAt);
+  const fallbackEventAtMs = payload.params.mobileReplay ? 0 : Date.now();
   return threadStatusChangedPayload(threadId, status, {
     source: method,
     turnId,
-    eventAtMs: threadStatusNotificationEventAtMs(payload, method),
+    eventAtMs: eventAtMs || fallbackEventAtMs,
+    mobileReplay: Boolean(payload.params.mobileReplay),
   });
-}
-
-function threadStatusNotificationEventAtMs(payload, method) {
-  const params = payload && payload.params && typeof payload.params === "object" ? payload.params : {};
-  const turn = params.turn && typeof params.turn === "object" ? params.turn : {};
-  const keys = method === "turn/completed"
-    ? [
-      "completedAtMs",
-      "completedAt",
-      "completed_at_ms",
-      "completed_at",
-      "finishedAt",
-      "finished_at",
-      "updatedAtMs",
-      "updatedAt",
-      "updated_at_ms",
-      "updated_at",
-      "startedAtMs",
-      "startedAt",
-      "started_at_ms",
-      "started_at",
-      "createdAtMs",
-      "createdAt",
-      "created_at_ms",
-      "created_at",
-    ]
-    : [
-      "startedAtMs",
-      "startedAt",
-      "started_at_ms",
-      "started_at",
-      "createdAtMs",
-      "createdAt",
-      "created_at_ms",
-      "created_at",
-      "updatedAtMs",
-      "updatedAt",
-      "updated_at_ms",
-      "updated_at",
-    ];
-  for (const key of keys) {
-    const value = timestampToMs(turn[key]) || timestampToMs(params[key]);
-    if (value) return value;
-  }
-  return timestampToMs(params.eventAtMs)
-    || timestampToMs(params.eventAt)
-    || timestampToMs(params.mobileReplayReceivedAtMs)
-    || timestampToMs(params.receivedAtMs)
-    || timestampToMs(params.timestampMs)
-    || timestampToMs(params.timestamp)
-    || Date.now();
 }
 
 function updateLocalActiveThreadStatusFromNotification(payload) {
@@ -9256,6 +9362,7 @@ class CodexAppServerClient {
       respondedAt: null,
     };
     if (this.answerWorkspaceSourceWriteGuardRequest(request)) return;
+    if (this.answerCodeGraphReadOnlyMcpElicitationRequest(request)) return;
     this.serverRequests.set(key, request);
     broadcast({ type: "serverRequest", request: publicServerRequest(request) });
     if (msg.method === "item/tool/call") {
@@ -9284,6 +9391,27 @@ class CodexAppServerClient {
       return true;
     } catch (err) {
       console.error(`[workspace-source-write-guard] failed request=${shortIdentifier(request && request.id)}: ${err.message || String(err)}`);
+      return false;
+    }
+  }
+
+  answerCodeGraphReadOnlyMcpElicitationRequest(request) {
+    const decision = codeGraphReadOnlyMcpElicitationDecision(request);
+    if (!decision) return false;
+    try {
+      const payload = serverRequestResponsePayload(request, { action: "accept" });
+      this.sendServerRequestResponse(request, payload);
+      request.status = "responded";
+      request.decision = "codegraph_readonly_allow";
+      request.respondedAt = Date.now();
+      console.log(`[mcp-elicitation] ${JSON.stringify({
+        action: request.decision,
+        requestId: shortIdentifier(request && request.id),
+        toolName: decision.toolName,
+      })}`);
+      return true;
+    } catch (err) {
+      console.error(`[mcp-elicitation] failed request=${shortIdentifier(request && request.id)}: ${err.message || String(err)}`);
       return false;
     }
   }
@@ -11624,18 +11752,6 @@ function threadFromTurnsList(threadId, summary, turnsResult) {
   }, summary || {}, { id: threadId, status, turns, mobileReadMode: "turns-list" })));
 }
 
-function shouldPreferRecentThreadDetail(detailMode, summary) {
-  if (String(detailMode || "").trim().toLowerCase() !== "recent") return false;
-  return isThreadListLiveStatus(summary && summary.status);
-}
-
-function shouldDeferThreadDetailEnrichment(summary, forceEnrichment) {
-  if (forceEnrichment || THREAD_DETAIL_DEFER_ENRICHMENT_BYTES <= 0) return false;
-  const rolloutPath = rolloutPathForThread(summary);
-  const stats = rolloutStatsForPath(rolloutPath);
-  return Boolean(stats && Number(stats.sizeBytes || 0) >= THREAD_DETAIL_DEFER_ENRICHMENT_BYTES);
-}
-
 function parseThreadTurnsCursor(value) {
   if (value === null || value === undefined || value === "") return null;
   if (typeof value === "object") return JSON.stringify(value);
@@ -11785,118 +11901,69 @@ function uniqueThreadTaskCardTargetIds(values, fallback = "") {
   return out;
 }
 
+const threadTaskCardRoutingService = createThreadTaskCardRoutingService({
+  normalizeFsPath,
+  threadDisplayTitle,
+  readThreadListFallback,
+  readThreadSummary: (threadId) => readStateDbThread(threadId) || readStartedThread(threadId) || readRolloutSessionFallbackThread(threadId),
+  visibilityFromGlobalState,
+  threadHasArchiveSignal,
+  isHiddenThread,
+  isSubagentThreadSummary,
+  isSideChatSidecarThreadSummary,
+  createError: (statusCode, code, message, details = {}) => httpStatusErrorWithDetails(statusCode, code, message || code, details),
+});
+
 function threadTaskCardTargetReferenceText(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return String(value.threadId || value.id || value.cwd || value.workspace || value.title || value.name || value.label || "").trim();
-  }
-  return String(value || "").trim();
+  return threadTaskCardRoutingService.targetReferenceText(value);
 }
 
 function threadTaskCardTargetReferenceEntry(kind, value) {
-  const text = threadTaskCardTargetReferenceText(value);
-  if (!text) return null;
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    if (value.threadId || value.id) kind = "threadId";
-    else if (value.cwd || value.workspace) kind = "workspace";
-    else if (value.title || value.name || value.label) kind = "title";
-  }
-  return { kind, text };
+  return threadTaskCardRoutingService.targetReferenceEntry(kind, value);
 }
 
 function threadTaskCardTargetReferenceEntries(body = {}) {
-  const values = [];
-  const push = (kind, value) => {
-    const entry = threadTaskCardTargetReferenceEntry(kind, value);
-    if (entry) values.push(entry);
-  };
-  if (Array.isArray(body.targetThreadIds)) body.targetThreadIds.forEach((value) => push("threadId", value));
-  if (body.targetThreadId) push("threadId", body.targetThreadId);
-  if (Array.isArray(body.targetThreads)) body.targetThreads.forEach((value) => push("thread", value));
-  if (Array.isArray(body.targetThreadRefs)) body.targetThreadRefs.forEach((value) => push("thread", value));
-  if (Array.isArray(body.targetThreadTitles)) body.targetThreadTitles.forEach((value) => push("title", value));
-  if (body.targetThreadTitle) push("title", body.targetThreadTitle);
-  if (Array.isArray(body.targetWorkspaces)) body.targetWorkspaces.forEach((value) => push("workspace", value));
-  if (body.targetWorkspace) push("workspace", body.targetWorkspace);
-  if (body.targetWorkspaceId) push("workspace", body.targetWorkspaceId);
-  if (Array.isArray(body.targetCwds)) body.targetCwds.forEach((value) => push("workspace", value));
-  if (body.targetCwd) push("workspace", body.targetCwd);
-  return values;
+  return threadTaskCardRoutingService.targetReferenceEntries(body);
 }
 
 function threadTaskCardTargetReferences(body = {}) {
-  return threadTaskCardTargetReferenceEntries(body).map((entry) => entry.text).filter(Boolean);
+  return threadTaskCardRoutingService.targetReferences(body);
 }
 
 function isThreadIdLike(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || "").trim());
+  return threadTaskCardRoutingService.isThreadIdLike(value);
 }
 
 function threadTaskCardTargetUpdatedAt(thread) {
-  const value = Number(thread && (thread.updatedAt || thread.updated_at || thread.updatedAtMs || thread.updated_at_ms) || 0);
-  return Number.isFinite(value) ? value : 0;
+  return threadTaskCardRoutingService.targetUpdatedAt(thread);
 }
 
 function publicThreadTaskCardTarget(thread) {
-  if (!thread || typeof thread !== "object") return null;
-  return {
-    threadId: String(thread.id || ""),
-    title: threadDisplayTitle(thread),
-    cwd: String(thread.cwd || ""),
-    updatedAt: threadTaskCardTargetUpdatedAt(thread),
-  };
+  return threadTaskCardRoutingService.publicTarget(thread);
 }
 
 function threadTaskCardTargetError(code, message, details = {}, statusCode = 400) {
-  return httpStatusErrorWithDetails(statusCode, code, message || code, details);
+  return threadTaskCardRoutingService.targetError(code, message, details, statusCode);
+}
+
+function threadTaskCardTargetVisibility(options = {}) {
+  return threadTaskCardRoutingService.targetVisibility(options);
 }
 
 function threadTaskCardVisibleTargetThreads(options = {}) {
-  const rawThreads = Array.isArray(options.visibleThreads)
-    ? options.visibleThreads
-    : readThreadListFallback(500, { archived: false });
-  const byId = new Map();
-  for (const thread of rawThreads || []) {
-    const id = String(thread && thread.id || "").trim();
-    if (!id || byId.has(id)) continue;
-    if (threadHasArchiveSignal(thread) || isSubagentThreadSummary(thread)) continue;
-    byId.set(id, thread);
-  }
-  return [...byId.values()];
+  return threadTaskCardRoutingService.visibleTargetThreads(options);
 }
 
 function threadTaskCardCanonicalTargetForCwd(cwd, visibleThreads = []) {
-  const wanted = normalizeFsPath(cwd || "");
-  if (!wanted) return null;
-  let best = null;
-  for (const thread of visibleThreads || []) {
-    if (!thread || normalizeFsPath(thread.cwd || "") !== wanted) continue;
-    if (!best || threadTaskCardTargetUpdatedAt(thread) > threadTaskCardTargetUpdatedAt(best)) {
-      best = thread;
-    }
-  }
-  return best;
+  return threadTaskCardRoutingService.canonicalTargetForCwd(cwd, visibleThreads);
 }
 
 function threadTaskCardCanonicalTargetForThread(thread, visibleThreads = []) {
-  if (!thread || !thread.cwd) return thread || null;
-  return threadTaskCardCanonicalTargetForCwd(thread.cwd, visibleThreads) || thread;
+  return threadTaskCardRoutingService.canonicalTargetForThread(thread, visibleThreads);
 }
 
 function threadTaskCardCanonicalVisibleTargets(visibleThreads = []) {
-  const out = [];
-  const seenCwds = new Set();
-  for (const thread of [...(visibleThreads || [])].sort((a, b) => threadTaskCardTargetUpdatedAt(b) - threadTaskCardTargetUpdatedAt(a))) {
-    if (!thread || !thread.id) continue;
-    const cwd = normalizeFsPath(thread.cwd || "");
-    if (!cwd) {
-      out.push(thread);
-      continue;
-    }
-    if (seenCwds.has(cwd)) continue;
-    seenCwds.add(cwd);
-    out.push(thread);
-  }
-  return out;
+  return threadTaskCardRoutingService.canonicalVisibleTargets(visibleThreads);
 }
 
 function readThreadTaskCardTargetSummary(threadId, options = {}) {
@@ -11904,82 +11971,16 @@ function readThreadTaskCardTargetSummary(threadId, options = {}) {
   return readStateDbThread(threadId) || readStartedThread(threadId) || readRolloutSessionFallbackThread(threadId);
 }
 
+function assertThreadTaskCardTargetDeliverable(thread, details = {}, options = {}) {
+  return threadTaskCardRoutingService.assertTargetDeliverable(thread, details, options);
+}
+
 function resolveThreadTaskCardTargetReference(value, sourceThreadId = "", options = {}) {
-  const entry = value && typeof value === "object" && !Array.isArray(value) && value.text
-    ? value
-    : threadTaskCardTargetReferenceEntry("thread", value);
-  const raw = String(entry && entry.text || "").trim();
-  if (!raw) return "";
-  if (raw === String(sourceThreadId || "")) return "";
-  const visibleThreads = threadTaskCardVisibleTargetThreads(options);
-  const visibleById = new Map(visibleThreads.map((thread) => [String(thread.id || ""), thread]));
-  const currentVisible = visibleById.get(raw);
-  if (currentVisible) {
-    const canonical = threadTaskCardCanonicalTargetForThread(currentVisible, visibleThreads);
-    if (canonical && String(canonical.id || "") !== raw) {
-      throw threadTaskCardTargetError(
-        "stale_target_thread",
-        "Target thread is not the current visible thread for its workspace.",
-        {
-          requestedTarget: publicThreadTaskCardTarget(currentVisible),
-          currentTarget: publicThreadTaskCardTarget(canonical),
-        },
-        409,
-      );
-    }
-    return String(currentVisible.id || "");
-  }
-  const direct = isThreadIdLike(raw) ? readThreadTaskCardTargetSummary(raw, options) : null;
-  if (direct && String(direct.id || "") === raw) {
-    const canonical = threadTaskCardCanonicalTargetForThread(direct, visibleThreads);
-    if (canonical && String(canonical.id || "") !== raw) {
-      throw threadTaskCardTargetError(
-        "stale_target_thread",
-        "Target thread is stale or hidden; use the current visible thread for this workspace.",
-        {
-          requestedTarget: publicThreadTaskCardTarget(direct),
-          currentTarget: publicThreadTaskCardTarget(canonical),
-        },
-        409,
-      );
-    }
-  }
-  const lowered = raw.toLowerCase();
-  const rawPath = normalizeFsPath(raw);
-  const byCwd = threadTaskCardCanonicalTargetForCwd(rawPath, visibleThreads);
-  if (byCwd && String(byCwd.id || "") !== String(sourceThreadId || "")) return String(byCwd.id || "");
-  for (const thread of visibleThreads) {
-    if (!thread || String(thread.id || "") === String(sourceThreadId || "")) continue;
-    const id = String(thread.id || "").trim();
-    const title = threadDisplayTitle(thread);
-    if (id.toLowerCase() === lowered || String(title || "").trim().toLowerCase() === lowered) {
-      const canonical = threadTaskCardCanonicalTargetForThread(thread, visibleThreads);
-      return String(canonical && canonical.id || id);
-    }
-  }
-  throw threadTaskCardTargetError(
-    "target_thread_not_visible",
-    "Target thread is not visible or is not a current deliverable thread.",
-    {
-      reference: raw,
-      referenceKind: entry.kind || "thread",
-    },
-    404,
-  );
+  return threadTaskCardRoutingService.resolveTargetReference(value, sourceThreadId, options);
 }
 
 function resolvedThreadTaskCardTargetIds(body = {}, sourceThreadId = "", options = {}) {
-  const visibleThreads = threadTaskCardVisibleTargetThreads(options);
-  const seen = new Set();
-  const out = [];
-  for (const reference of threadTaskCardTargetReferenceEntries(body)) {
-    const id = resolveThreadTaskCardTargetReference(reference, sourceThreadId, Object.assign({}, options, { visibleThreads }));
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    out.push(id);
-    if (out.length >= 12) break;
-  }
-  return out;
+  return threadTaskCardRoutingService.resolvedTargetIds(body, sourceThreadId, options);
 }
 
 function threadTaskCardThreadCallIdempotencyKey(sourceThreadId, body = {}, targetThreadIds = []) {
@@ -11997,13 +11998,18 @@ function threadTaskCardThreadCallIdempotencyKey(sourceThreadId, body = {}, targe
   return `thread-call:${stableTextHash(sourceThreadId)}:${stableTextHash(seed)}`;
 }
 
-function buildThreadTaskCardCreatePayload(body = {}, sourceThreadId = "") {
+function buildThreadTaskCardCreatePayload(body = {}, sourceThreadId = "", options = {}) {
   const sourceId = String(sourceThreadId || body.sourceThreadId || "").trim();
   if (body.sourceThreadId && String(body.sourceThreadId || "").trim() !== sourceId) {
     throw httpStatusError(400, "source_thread_id_mismatch");
   }
-  const sourceSummary = readStateDbThread(sourceId) || readStartedThread(sourceId) || readRolloutSessionFallbackThread(sourceId);
-  const targetThreadIds = resolvedThreadTaskCardTargetIds(body, sourceId);
+  const readThreadSummary = typeof options.readThreadSummary === "function"
+    ? options.readThreadSummary
+    : (threadId) => readStateDbThread(threadId) || readStartedThread(threadId) || readRolloutSessionFallbackThread(threadId) || null;
+  const sourceSummary = hydrateThreadTitleFromSessionIndex(
+    readThreadSummary(sourceId) || (sourceId ? { id: sourceId } : null),
+  );
+  const targetThreadIds = resolvedThreadTaskCardTargetIds(body, sourceId, options);
   if (!targetThreadIds.length) {
     throw threadTaskCardTargetError(
       "target_thread_required",
@@ -12015,7 +12021,7 @@ function buildThreadTaskCardCreatePayload(body = {}, sourceThreadId = "") {
   const targetWorkspaceIds = Object.assign({}, body.targetWorkspaceIds && typeof body.targetWorkspaceIds === "object" ? body.targetWorkspaceIds : {});
   for (const targetThreadId of targetThreadIds) {
     if (!targetThreadId || targetWorkspaceIds[targetThreadId]) continue;
-    const targetSummary = readStateDbThread(targetThreadId) || readStartedThread(targetThreadId) || readRolloutSessionFallbackThread(targetThreadId);
+    const targetSummary = readThreadSummary(targetThreadId);
     targetWorkspaceIds[targetThreadId] = body.targetWorkspaceId || body.targetWorkspace || (targetSummary && targetSummary.cwd) || "";
   }
   const rawBody = String(body.body || body.bodyMarkdown || body.message || "").trim();
@@ -12024,7 +12030,7 @@ function buildThreadTaskCardCreatePayload(body = {}, sourceThreadId = "") {
     sourceThreadId: sourceId,
     sourceTurnId: body.sourceTurnId || body.turnId || "",
     sourceWorkspaceId: body.sourceWorkspaceId || body.sourceWorkspace || (sourceSummary && sourceSummary.cwd) || "",
-    sourceThreadTitle: body.sourceThreadTitle || (sourceSummary && threadDisplayTitle(sourceSummary)) || sourceId,
+    sourceThreadTitle: taskCardSourceThreadTitle(sourceId, body.sourceThreadTitle, sourceSummary),
     targetThreadIds,
     targetWorkspaceIds,
     idempotencyKey: threadTaskCardThreadCallIdempotencyKey(sourceId, body, targetThreadIds),
@@ -12035,10 +12041,11 @@ function buildThreadTaskCardCreatePayload(body = {}, sourceThreadId = "") {
   });
 }
 
-async function createThreadTaskCardsFromSourceThread(sourceThreadId, body = {}) {
-  const payload = buildThreadTaskCardCreatePayload(body, sourceThreadId);
-  const cards = await threadTaskCardService.createMany(payload);
-  const workspaceDelegation = workspaceDelegationPublicSettings();
+async function createThreadTaskCardsFromSourceThread(sourceThreadId, body = {}, options = {}) {
+  const payload = buildThreadTaskCardCreatePayload(body, sourceThreadId, options);
+  const service = options.threadTaskCardService || threadTaskCardService;
+  const cards = await service.createMany(payload);
+  const workspaceDelegation = options.workspaceDelegation || workspaceDelegationPublicSettings();
   const autoApprove = workspaceDelegation.enabled
     && body.autoApprove !== false
     && body.direct !== false
@@ -12046,7 +12053,7 @@ async function createThreadTaskCardsFromSourceThread(sourceThreadId, body = {}) 
   const approvals = [];
   if (autoApprove) {
     for (const card of cards) {
-      approvals.push(await threadTaskCardService.approveFromSource(card.id, payload.sourceThreadId));
+      approvals.push(await service.approveFromSource(card.id, payload.sourceThreadId));
     }
   }
   const publicCards = autoApprove
@@ -12317,14 +12324,35 @@ function truncateThreadTaskCardBody(value, maxChars = THREAD_TASK_CARD_BODY_MAX_
 }
 
 function threadDisplayTitle(thread) {
-  return String((thread && (thread.name || thread.title || thread.preview || thread.id)) || "").trim();
+  if (!thread || typeof thread !== "object") return "";
+  const id = String(thread.id || thread.threadId || "").trim();
+  for (const value of [
+    thread.displayTitle,
+    thread.threadTitle,
+    thread.thread_name,
+    thread.name,
+    thread.title,
+    thread.preview,
+  ]) {
+    const text = String(value || "").trim();
+    if (text && !isRecoverableThreadListTitle(text, id)) return text;
+  }
+  return id;
+}
+
+function taskCardSourceThreadTitle(sourceThreadId, requestedTitle = "", sourceSummary = null) {
+  const id = String(sourceThreadId || "").trim();
+  const requested = String(requestedTitle || "").trim();
+  if (requested && !isRecoverableThreadListTitle(requested, id)) return requested;
+  const title = threadDisplayTitle(hydrateThreadTitleFromSessionIndex(sourceSummary || (id ? { id } : null)));
+  return title || id;
 }
 
 async function materializeThreadTaskCardDraftsForThread(thread) {
   if (!thread || typeof thread !== "object" || !thread.id || !Array.isArray(thread.turns)) return [];
   const sourceThreadId = String(thread.id || "");
   const sourceWorkspaceId = String(thread.cwd || (readStateDbThread(sourceThreadId) || {}).cwd || "");
-  const sourceThreadTitle = threadDisplayTitle(thread) || sourceThreadId;
+  const sourceThreadTitle = taskCardSourceThreadTitle(sourceThreadId, "", thread);
   const created = [];
   for (const turn of thread.turns) {
     const turnId = String(turn && turn.id || "");
@@ -12416,6 +12444,53 @@ async function turnsListThreadReadResult(threadId, summary, runtimeSettings, war
   return prepareThreadDetailResponseResult(result, { threadId, source: mode });
 }
 
+async function readRawThreadDetailForOrchestrator({ threadId, summary, runtimeSettings }) {
+  const result = await codex.request("thread/read", { threadId, includeTurns: true }, {
+    timeoutMs: READ_RPC_TIMEOUT_MS,
+    retry: false,
+    resetOnTimeout: false,
+  });
+  if (result && result.thread) {
+    result.thread = applySessionIndexTitleToThread(result.thread, readSessionIndexEntries().get(threadId));
+    threadDisplaySummaryCache.remember(result.thread);
+    result.thread = mergeThreadRuntimeFromStateDb(result.thread, summary);
+    result.thread.runtimeSettings = publicRuntimeSettings(runtimeSettings);
+    result.thread.mobileReadMode = "thread-read-raw";
+    result.thread.mobileProjectionVersion = "raw";
+    result.thread.mobileProjection = {
+      source: "thread-read",
+      version: "raw",
+      projectionDisabled: true,
+    };
+    result.thread.mobileRawThreadRead = true;
+    appendRolloutFinalReceiptsToThread(result.thread);
+  }
+  return result;
+}
+
+async function readFullThreadDetailForOrchestrator({ threadId, summary, runtimeSettings }) {
+  const result = compactThreadReadResult(await codex.request("thread/read", { threadId, includeTurns: true }, {
+    timeoutMs: READ_RPC_TIMEOUT_MS,
+    retry: false,
+    resetOnTimeout: false,
+  }), { maxTurns: MAX_FULL_THREAD_TURNS });
+  if (result.thread) {
+    result.thread = applySessionIndexTitleToThread(result.thread, readSessionIndexEntries().get(threadId));
+    threadDisplaySummaryCache.remember(result.thread);
+    result.thread = mergeThreadRuntimeFromStateDb(result.thread, summary);
+    result.thread.runtimeSettings = publicRuntimeSettings(runtimeSettings);
+    result.thread.mobileReadMode = "thread-read";
+  }
+  return result;
+}
+
+function fallbackThreadReadResultForOrchestrator({ threadId, summary, runtimeSettings, warning, mode }) {
+  return finalizeThreadDetailProjectionResult(
+    fallbackThreadReadResult(threadId, summary, runtimeSettings, warning, mode),
+    { threadId, source: mode },
+  );
+}
+
 function filterFallbackThreads(threads, filters = {}) {
   const globalState = filters.globalState || readGlobalState();
   const visibility = visibilityFromGlobalState(globalState);
@@ -12488,6 +12563,13 @@ function readSessionIndexEntries(maxLines = 2000) {
     return byId;
   }
   return byId;
+}
+
+function hydrateThreadTitleFromSessionIndex(thread, indexEntries = readSessionIndexEntries()) {
+  if (!thread || typeof thread !== "object") return thread || null;
+  const id = String(thread.id || thread.threadId || "").trim();
+  if (!id || !indexEntries || typeof indexEntries.get !== "function") return thread;
+  return applySessionIndexTitleToThread(thread, indexEntries.get(id));
 }
 
 function persistThreadTitleToSessionIndex(threadId, threadName, updatedAt = new Date()) {
@@ -12951,88 +13033,41 @@ function readSessionIndexFallback(limit = 80, filters = {}) {
   }
 }
 
-const threadListFallbackCache = new Map();
+const threadListFallbackCacheService = createThreadListFallbackCacheService({
+  ttlMs: THREAD_LIST_FALLBACK_CACHE_TTL_MS,
+  maxEntries: 12,
+  readGlobalState,
+  normalizeFsPath,
+  normalizeThreadId,
+  visibleWorkspaceRoots,
+  visibleProjectlessThreadIds,
+  mergeThreadDisplaySummary,
+  normalizeThreadSummaryLiveStatus,
+  filterFallbackThreads,
+  mergeThreadSummaryList,
+  readStateDbFallback,
+  readRolloutSessionFallback,
+  readSessionIndexFallback,
+});
 
 function clearThreadListFallbackCache() {
-  threadListFallbackCache.clear();
+  threadListFallbackCacheService.clear();
 }
 
 function removeThreadFromThreadListFallbackCache(threadId) {
-  const id = String(threadId || "").trim();
-  if (!id || !threadListFallbackCache.size) return false;
-  let removed = false;
-  for (const entry of threadListFallbackCache.values()) {
-    const before = Array.isArray(entry.threads) ? entry.threads.length : 0;
-    entry.threads = (entry.threads || []).filter((thread) => String(thread && thread.id || "") !== id);
-    if (entry.threads.length !== before) {
-      removed = true;
-      entry.updatedAt = Date.now();
-      entry.incrementalUpdates = Number(entry.incrementalUpdates || 0) + 1;
-    }
-  }
-  return removed;
-}
-
-function cloneThreadListFallbackFilters(filters = {}) {
-  return {
-    cwd: String(filters.cwd || ""),
-    searchTerm: String(filters.searchTerm || ""),
-    globalState: filters.globalState && typeof filters.globalState === "object"
-      ? clonePlainJson(filters.globalState)
-      : null,
-  };
+  return threadListFallbackCacheService.removeThread(threadId);
 }
 
 function upsertThreadListFallbackCacheThread(thread, options = {}) {
-  const id = String(thread && thread.id || "").trim();
-  if (!id || !threadListFallbackCache.size) return false;
-  const addIfMissing = options.addIfMissing === true;
-  const nowMs = Date.now();
-  let changed = false;
-  for (const entry of threadListFallbackCache.values()) {
-    const existing = (entry.threads || []).find((candidate) => String(candidate && candidate.id || "") === id) || null;
-    if (!existing && !addIfMissing) continue;
-    const candidate = normalizeThreadSummaryLiveStatus(mergeThreadDisplaySummary(existing, thread) || thread);
-    const filters = entry.filters || {};
-    const filtered = filterFallbackThreads([candidate], {
-      cwd: filters.cwd,
-      searchTerm: filters.searchTerm,
-      globalState: filters.globalState || undefined,
-    });
-    const withoutThread = (entry.threads || []).filter((item) => String(item && item.id || "") !== id);
-    entry.threads = filtered.length
-      ? mergeThreadSummaryList([...withoutThread, filtered[0]]).slice(0, Math.max(1, Number(entry.limit || 80)))
-      : withoutThread;
-    entry.updatedAt = nowMs;
-    entry.incrementalUpdates = Number(entry.incrementalUpdates || 0) + 1;
-    changed = true;
-  }
-  return changed;
+  return threadListFallbackCacheService.upsertThread(thread, options);
 }
 
 function updateThreadListFallbackCacheStatus(threadId, status, meta = {}) {
-  const id = String(threadId || "").trim();
-  if (!id || !threadListFallbackCache.size) return false;
-  const updatedAt = Math.floor(Date.now() / 1000);
-  const patch = {
-    id,
-    status: status || { type: "notLoaded" },
-    updatedAt,
-  };
-  const source = String(meta.source || "").trim();
-  const turnId = String(meta.turnId || "").trim();
-  if (source) patch.mobileStatusSource = source;
-  if (turnId) patch.mobileStatusTurnId = turnId;
-  return upsertThreadListFallbackCacheThread(patch, { addIfMissing: false });
+  return threadListFallbackCacheService.updateStatus(threadId, status, meta);
 }
 
 function applyThreadStatusPayloadToThreadListFallbackCache(payload) {
-  if (!payload || payload.type !== "notification" || payload.method !== "thread/status/changed") return false;
-  const params = payload.params || {};
-  return updateThreadListFallbackCacheStatus(params.threadId, params.status, {
-    source: params.source,
-    turnId: params.turnId,
-  });
+  return threadListFallbackCacheService.applyStatusPayload(payload);
 }
 
 function trackThreadDetailRequestLifecycle(res) {
@@ -13062,94 +13097,19 @@ function clonePlainJson(value) {
 }
 
 function threadListFallbackCacheKey(limit, filters = {}) {
-  const globalState = filters.globalState || readGlobalState();
-  const roots = [...visibleWorkspaceRoots(globalState)].map(normalizeFsPath).filter(Boolean).sort();
-  const projectlessIds = [...visibleProjectlessThreadIds(globalState)].map(normalizeThreadId).filter(Boolean).sort();
-  return JSON.stringify({
-    limit: Math.max(1, Math.min(200, Number(limit || 80))),
-    cwd: normalizeFsPath(filters.cwd || ""),
-    search: String(filters.searchTerm || "").trim().toLowerCase(),
-    roots,
-    projectlessIds,
-  });
+  return threadListFallbackCacheService.cacheKey(limit, filters);
 }
 
 function rememberThreadListFallbackCache(key, threads, timings = {}, options = {}) {
-  if (!key) return;
-  threadListFallbackCache.set(key, {
-    cachedAt: Date.now(),
-    updatedAt: Date.now(),
-    limit: Math.max(1, Math.min(200, Number(options.limit || 80))),
-    filters: cloneThreadListFallbackFilters(options.filters || {}),
-    threads: clonePlainJson(Array.isArray(threads) ? threads : []),
-    timings: Object.assign({}, timings || {}),
-    incrementalUpdates: 0,
-  });
-  if (threadListFallbackCache.size > 12) {
-    const oldestKey = threadListFallbackCache.keys().next().value;
-    if (oldestKey) threadListFallbackCache.delete(oldestKey);
-  }
+  threadListFallbackCacheService.remember(key, threads, timings, options);
 }
 
 function readThreadListFallbackCache(key) {
-  if (!key) return null;
-  const cached = threadListFallbackCache.get(key);
-  if (!cached) return null;
-  if (THREAD_LIST_FALLBACK_CACHE_TTL_MS > 0
-    && cached.cachedAt
-    && Date.now() - Number(cached.cachedAt || 0) > THREAD_LIST_FALLBACK_CACHE_TTL_MS) {
-    if (cached) threadListFallbackCache.delete(key);
-    return null;
-  }
-  return {
-    threads: clonePlainJson(cached.threads || []),
-    timings: Object.assign({}, cached.timings || {}),
-    cachedAt: Number(cached.cachedAt || 0),
-    updatedAt: Number(cached.updatedAt || cached.cachedAt || 0),
-    incrementalUpdates: Number(cached.incrementalUpdates || 0),
-  };
+  return threadListFallbackCacheService.read(key);
 }
 
 function readThreadListFallback(limit = 80, filters = {}) {
-  const diagnostics = filters.diagnostics && typeof filters.diagnostics === "object" ? filters.diagnostics : null;
-  const cacheKey = threadListFallbackCacheKey(limit, filters);
-  const cached = readThreadListFallbackCache(cacheKey);
-  if (cached) {
-    if (diagnostics) {
-      diagnostics.cacheHit = true;
-      diagnostics.stateDbMs = 0;
-      diagnostics.rolloutMs = 0;
-      diagnostics.sessionIndexMs = 0;
-      diagnostics.cachedSourceTimings = cached.timings;
-      diagnostics.cacheAgeMs = cached.updatedAt ? Math.max(0, Date.now() - cached.updatedAt) : 0;
-      diagnostics.cacheIncrementalUpdates = cached.incrementalUpdates || 0;
-    }
-    return cached.threads;
-  }
-  if (diagnostics) diagnostics.cacheHit = false;
-  const stateDbStartedAtMs = Date.now();
-  const stateDbFallback = readStateDbFallback(limit, filters);
-  if (diagnostics) diagnostics.stateDbMs = Math.max(0, Date.now() - stateDbStartedAtMs);
-  const rolloutStartedAtMs = Date.now();
-  const rolloutFallback = readRolloutSessionFallback(limit, filters);
-  if (diagnostics) diagnostics.rolloutMs = Math.max(0, Date.now() - rolloutStartedAtMs);
-  const sessionIndexStartedAtMs = Date.now();
-  const sessionIndexFallback = readSessionIndexFallback(limit, filters);
-  if (diagnostics) diagnostics.sessionIndexMs = Math.max(0, Date.now() - sessionIndexStartedAtMs);
-  const threads = mergeThreadSummaryList([
-    ...stateDbFallback,
-    ...rolloutFallback,
-    ...sessionIndexFallback,
-  ]).slice(0, limit);
-  rememberThreadListFallbackCache(cacheKey, threads, {
-    stateDbMs: diagnostics && diagnostics.stateDbMs || 0,
-    rolloutMs: diagnostics && diagnostics.rolloutMs || 0,
-    sessionIndexMs: diagnostics && diagnostics.sessionIndexMs || 0,
-  }, {
-    limit,
-    filters,
-  });
-  return threads;
+  return threadListFallbackCacheService.readFallback(limit, filters);
 }
 
 async function listWorkspaces() {
@@ -13457,6 +13417,22 @@ async function handleApi(req, res) {
       sendJson(res, 200, {
         ok: true,
         workspaceDelegation: setWorkspaceDelegationEnabled(body.enabled),
+      });
+    } catch (err) {
+      sendJson(res, err.statusCode || 500, { ok: false, error: err.message || String(err) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/settings/thread-display" && (req.method === "GET" || req.method === "POST")) {
+    try {
+      if (req.method === "GET") {
+        sendJson(res, 200, { ok: true, threadDisplay: threadDisplayPublicSettings() });
+        return;
+      }
+      const body = await readBody(req);
+      sendJson(res, 200, {
+        ok: true,
+        threadDisplay: setThreadDisplaySettings(body),
       });
     } catch (err) {
       sendJson(res, err.statusCode || 500, { ok: false, error: err.message || String(err) });
@@ -13876,7 +13852,7 @@ async function handleApi(req, res) {
   if (url.pathname === "/api/thread-task-cards" && req.method === "POST") {
     try {
       const body = await readBody(req);
-      const sourceSummary = readStateDbThread(body.sourceThreadId) || readStartedThread(body.sourceThreadId);
+      const sourceSummary = hydrateThreadTitleFromSessionIndex(readStateDbThread(body.sourceThreadId) || readStartedThread(body.sourceThreadId) || (body.sourceThreadId ? { id: body.sourceThreadId } : null));
       const requestedTargetIds = Array.isArray(body.targetThreadIds) && body.targetThreadIds.length
         ? body.targetThreadIds
         : [body.targetThreadId];
@@ -13890,7 +13866,7 @@ async function handleApi(req, res) {
       const cards = await threadTaskCardService.createMany(Object.assign({}, body, {
         sourceWorkspaceId: body.sourceWorkspaceId || body.sourceWorkspace || (sourceSummary && sourceSummary.cwd) || "",
         targetWorkspaceIds,
-        sourceThreadTitle: body.sourceThreadTitle || (sourceSummary && (sourceSummary.name || sourceSummary.preview || sourceSummary.id)) || body.sourceThreadId || "",
+        sourceThreadTitle: taskCardSourceThreadTitle(body.sourceThreadId, body.sourceThreadTitle, sourceSummary),
       }));
       sendJson(res, 200, {
         ok: true,
@@ -13958,11 +13934,11 @@ async function handleApi(req, res) {
       const cardId = decodeURIComponent(threadTaskCardReply[1]);
       const body = await readBody(req);
       const actorThreadId = body.threadId || body.actorThreadId || "";
-      const actorSummary = readStateDbThread(actorThreadId) || readStartedThread(actorThreadId);
+      const actorSummary = hydrateThreadTitleFromSessionIndex(readStateDbThread(actorThreadId) || readStartedThread(actorThreadId) || (actorThreadId ? { id: actorThreadId } : null));
       sendJson(res, 200, Object.assign({ ok: true }, await threadTaskCardService.reply(cardId, actorThreadId, Object.assign({}, body, {
         sourceWorkspaceId: body.sourceWorkspaceId || (actorSummary && actorSummary.cwd) || "",
         sourceThreadId: body.sourceThreadId || actorThreadId,
-        sourceThreadTitle: body.sourceThreadTitle || (actorSummary && (actorSummary.name || actorSummary.preview || actorSummary.id)) || actorThreadId,
+        sourceThreadTitle: taskCardSourceThreadTitle(actorThreadId, body.sourceThreadTitle, actorSummary),
       }))));
     } catch (err) {
       sendJson(res, err.statusCode || 500, { ok: false, error: err.message || String(err) });
@@ -14433,307 +14409,24 @@ async function handleApi(req, res) {
     trackThreadDetailRequestLifecycle(res);
     const threadId = decodeURIComponent(threadRead[1]);
     const detailMode = String(url.searchParams.get("mode") || "").trim().toLowerCase();
-    const forceEnrichment = /^(1|true|yes|on)$/i.test(String(url.searchParams.get("enrich") || "").trim());
+    const preferRecentTurns = detailMode === "recent";
     const requestStartedAtMs = Date.now();
     const threadLog = (event, details = {}) => logThreadDetail(event, Object.assign({
       threadId,
       elapsedMs: Date.now() - requestStartedAtMs,
     }, details));
-    threadLog("start", {
-      transport: codex.transportKind,
-      ready: codex.ready,
+    const detailResponse = await threadDetailReadOrchestrationService.readThreadDetail({
+      codex,
+      threadId,
+      preferRecentTurns,
+      threadLog,
     });
-    const globalState = readGlobalState();
-    const visibility = visibilityFromGlobalState(globalState);
-    let summary = readStateDbThread(threadId);
-    let summarySource = summary ? "state-db" : "none";
-    if (!summary) {
-      summary = readStartedThread(threadId);
-      summarySource = summary ? "started-cache" : "none";
-    }
-    if (!summary) {
-      summary = readRolloutSessionFallbackThread(threadId);
-      summarySource = summary ? "rollout-session" : "none";
-    }
-    if (!summary) {
-      const summaryStartedAtMs = Date.now();
-      threadLog("summary_app_server_start");
-      try {
-        summary = await readThreadSummaryFromAppServer(codex, threadId);
-        summarySource = summary ? "app-server" : "none";
-        threadLog("summary_app_server_ok", {
-          durationMs: Date.now() - summaryStartedAtMs,
-          found: Boolean(summary),
-        });
-      } catch (err) {
-        threadLog("summary_app_server_error", {
-          durationMs: Date.now() - summaryStartedAtMs,
-          error: err.message || String(err),
-        });
-      }
-    } else {
-      const summaryStartedAtMs = Date.now();
-      threadLog("summary_app_server_refresh_start", { baseSource: summarySource });
-      try {
-        const appServerSummary = await readThreadSummaryFromAppServer(codex, threadId);
-        if (appServerSummary) {
-          summary = mergeThreadDisplaySummary(summary, appServerSummary);
-          summarySource = `${summarySource}+app-server`;
-        }
-        threadLog("summary_app_server_refresh_ok", {
-          durationMs: Date.now() - summaryStartedAtMs,
-          found: Boolean(appServerSummary),
-        });
-      } catch (err) {
-        threadLog("summary_app_server_refresh_error", {
-          durationMs: Date.now() - summaryStartedAtMs,
-          error: err.message || String(err),
-        });
-      }
-    }
-    summary = applyLocalActiveThreadStatusToSummary(summary, { threadId });
-    threadLog("summary_ready", {
-      source: summarySource,
-      title: summary && (summary.name || summary.preview || ""),
-      rolloutSizeBytes: summary ? threadRolloutSizeBytes(summary) : null,
-      status: summary && summary.status ? summary.status.type || summary.status : null,
-    });
-    const preferRecentTurns = shouldPreferRecentThreadDetail(detailMode, summary);
-    const deferProjectionEnrichment = shouldDeferThreadDetailEnrichment(summary, forceEnrichment);
-    const runtimeSettings = threadRuntimeSettings(threadId, summary);
-    if (summary && isHiddenThread(summary, visibility)) {
-      threadLog("hidden", { status: 404 });
-      sendJson(res, 404, { error: "Thread is archived, deleted, or outside visible workspaces" });
-      threadLog("complete", { status: 404, mode: "hidden" });
-      return;
-    }
-    if (THREAD_DETAIL_RAW_ALL_ENABLED) {
-      const readStartedAtMs = Date.now();
-      threadLog("thread_read_raw_start", { timeoutMs: READ_RPC_TIMEOUT_MS });
-      try {
-        const result = await codex.request("thread/read", { threadId, includeTurns: true }, {
-          timeoutMs: READ_RPC_TIMEOUT_MS,
-          retry: false,
-          resetOnTimeout: false,
-        });
-        if (result && result.thread) {
-          result.thread = applySessionIndexTitleToThread(result.thread, readSessionIndexEntries().get(threadId));
-          threadDisplaySummaryCache.remember(result.thread);
-          result.thread = mergeThreadRuntimeFromStateDb(result.thread, summary);
-          result.thread.runtimeSettings = publicRuntimeSettings(runtimeSettings);
-          result.thread.mobileReadMode = "thread-read-raw";
-          result.thread.mobileProjectionVersion = "raw";
-          result.thread.mobileProjection = {
-            source: "thread-read",
-            version: "raw",
-            projectionDisabled: true,
-          };
-          result.thread.mobileRawThreadRead = true;
-          appendRolloutFinalReceiptsToThread(result.thread);
-        }
-        if (isHiddenThread(result && result.thread, visibility)) {
-          threadLog("thread_read_raw_hidden", {
-            durationMs: Date.now() - readStartedAtMs,
-            status: 404,
-          });
-          sendJson(res, 404, { error: "Thread is archived, deleted, or outside visible workspaces" });
-          return;
-        }
-        threadLog("thread_read_raw_ok", {
-          durationMs: Date.now() - readStartedAtMs,
-          returnedTurns: result && result.thread && Array.isArray(result.thread.turns) ? result.thread.turns.length : null,
-        });
-        sendJson(res, 200, await prepareThreadDetailResponseResult(result, { threadId, source: "thread-read-raw" }));
-        threadLog("complete", { status: 200, mode: "thread-read-raw" });
-      } catch (err) {
-        threadLog("thread_read_raw_error", {
-          durationMs: Date.now() - readStartedAtMs,
-          timeout: isReadTimeoutError(err),
-          error: err.message || String(err),
-        });
-        sendJson(res, err.statusCode || 500, { error: err.message || String(err) });
-      }
-      return;
-    }
-    const projectionInput = threadDetailProjectionInput(threadId, summary);
-    const projectionStartedAtMs = Date.now();
-    const projected = projectionInput ? prepareProjectedThreadReadResult(
-      threadDetailProjectionService.get(projectionInput),
-      summary,
-      runtimeSettings,
-      {
-        deferRolloutEnrichment: deferProjectionEnrichment,
-        deferRolloutEnrichmentReason: "large-rollout-first-paint",
-      },
-    ) : null;
-    if (projected && projected.thread) {
-      if (isHiddenThread(projected.thread, visibility)) {
-        threadLog("projection_hidden", {
-          durationMs: Date.now() - projectionStartedAtMs,
-          status: 404,
-        });
-        sendJson(res, 404, { error: "Thread is archived, deleted, or outside visible workspaces" });
-        return;
-      }
-      threadDisplaySummaryCache.remember(projected.thread);
-      threadLog("projection_hit", {
-        durationMs: Date.now() - projectionStartedAtMs,
-        mode: projected.thread.mobileReadMode,
-        returnedTurns: Array.isArray(projected.thread.turns) ? projected.thread.turns.length : null,
-        omittedTurns: projected.thread.mobileOmittedTurnCount || 0,
-        deferredEnrichment: Boolean(projected.thread.mobileDeferredEnrichment),
+    sendJson(res, detailResponse.status || 200, detailResponse.body || {});
+    if (detailResponse.complete !== false) {
+      threadLog("complete", {
+        status: detailResponse.status || 200,
+        mode: detailResponse.mode || "unknown",
       });
-      sendJson(res, 200, await prepareThreadDetailResponseResult(projected, {
-        threadId,
-        source: projected.thread.mobileReadMode || "projection",
-      }));
-      threadLog("complete", { status: 200, mode: projected.thread.mobileReadMode });
-      return;
-    }
-    if (preferRecentTurns) {
-      const turnsStartedAtMs = Date.now();
-      try {
-        const result = await turnsListThreadReadResult(
-          threadId,
-          summary,
-          runtimeSettings,
-          "",
-          "turns-list-initial",
-          threadLog,
-        );
-        if (isHiddenThread(result.thread, visibility)) {
-          threadLog("turns_list_initial_hidden", {
-            durationMs: Date.now() - turnsStartedAtMs,
-            status: 404,
-          });
-          sendJson(res, 404, { error: "Thread is archived, deleted, or outside visible workspaces" });
-          return;
-        }
-        threadLog("complete", { status: 200, mode: "turns-list-initial" });
-        sendJson(res, 200, result);
-        return;
-      } catch (turnsErr) {
-        threadLog("turns_list_initial_error", {
-          durationMs: Date.now() - turnsStartedAtMs,
-          timeout: isReadTimeoutError(turnsErr),
-          error: turnsErr.message || String(turnsErr),
-        });
-      }
-    }
-    const readStartedAtMs = Date.now();
-    threadLog("thread_read_start", {
-      timeoutMs: READ_RPC_TIMEOUT_MS,
-      maxTurns: MAX_FULL_THREAD_TURNS,
-    });
-    try {
-      let result = compactThreadReadResult(await codex.request("thread/read", { threadId, includeTurns: true }, {
-        timeoutMs: READ_RPC_TIMEOUT_MS,
-        retry: false,
-        resetOnTimeout: false,
-      }), { maxTurns: MAX_FULL_THREAD_TURNS });
-      if (result.thread) {
-        result.thread = applySessionIndexTitleToThread(result.thread, readSessionIndexEntries().get(threadId));
-        threadDisplaySummaryCache.remember(result.thread);
-        result.thread = mergeThreadRuntimeFromStateDb(result.thread, summary);
-        result.thread.runtimeSettings = publicRuntimeSettings(runtimeSettings);
-        result.thread.mobileReadMode = "thread-read";
-      }
-      if (isHiddenThread(result.thread, visibility)) {
-        threadLog("thread_read_hidden", {
-          durationMs: Date.now() - readStartedAtMs,
-          status: 404,
-        });
-        sendJson(res, 404, { error: "Thread is archived, deleted, or outside visible workspaces" });
-        return;
-      }
-      threadLog("thread_read_ok", {
-        durationMs: Date.now() - readStartedAtMs,
-        returnedTurns: result.thread && Array.isArray(result.thread.turns) ? result.thread.turns.length : null,
-        omittedTurns: result.thread && result.thread.mobileOmittedTurnCount ? result.thread.mobileOmittedTurnCount : 0,
-      });
-      if (projectionInput && result.thread) {
-        try {
-          threadDetailProjectionService.seed(projectionInput, result);
-          result.thread.mobileProjection = Object.assign({}, result.thread.mobileProjection || {}, { source: "seeded" });
-        } catch (err) {
-          threadLog("projection_seed_error", { error: err.message || String(err) });
-        }
-      }
-      sendJson(res, 200, await prepareThreadDetailResponseResult(result, {
-        threadId,
-        source: "thread-read",
-      }));
-      threadLog("complete", { status: 200, mode: "thread-read" });
-    } catch (readErr) {
-      threadLog("thread_read_error", {
-        durationMs: Date.now() - readStartedAtMs,
-        timeout: isReadTimeoutError(readErr),
-        error: readErr.message || String(readErr),
-      });
-      const turnsStartedAtMs = Date.now();
-      threadLog("turns_list_start", {
-        limit: MAX_THREAD_TURNS,
-        timeoutMs: THREAD_DETAIL_RPC_TIMEOUT_MS,
-        fallbackFrom: "thread-read",
-      });
-      try {
-        const result = await turnsListThreadReadResult(
-          threadId,
-          summary,
-          runtimeSettings,
-          `thread/read failed: ${readErr.message || String(readErr)}`,
-          "turns-list",
-          null,
-        );
-        if (isHiddenThread(result.thread, visibility)) {
-          threadLog("turns_list_hidden", {
-            durationMs: Date.now() - turnsStartedAtMs,
-            status: 404,
-          });
-          sendJson(res, 404, { error: "Thread is archived, deleted, or outside visible workspaces" });
-          return;
-        }
-        threadLog("turns_list_ok", {
-          durationMs: Date.now() - turnsStartedAtMs,
-          returnedTurns: result.thread && Array.isArray(result.thread.turns) ? result.thread.turns.length : null,
-          mode: result.thread && result.thread.mobileReadMode ? result.thread.mobileReadMode : "turns-list",
-        });
-        sendJson(res, 200, result);
-        threadLog("complete", { status: 200, mode: "turns-list" });
-      } catch (turnsErr) {
-        threadLog("turns_list_error", {
-          durationMs: Date.now() - turnsStartedAtMs,
-          timeout: isReadTimeoutError(turnsErr),
-          error: turnsErr.message || String(turnsErr),
-        });
-        if (isUnmaterializedThreadError(turnsErr)) {
-          sendJson(res, 200, finalizeThreadDetailProjectionResult(
-            fallbackThreadReadResult(threadId, summary, runtimeSettings, turnsErr.message || String(turnsErr), "unmaterialized"),
-            { threadId, source: "unmaterialized" },
-          ));
-          threadLog("complete", { status: 200, mode: "unmaterialized" });
-          return;
-        }
-
-        if (isReadTimeoutError(turnsErr)) {
-          sendJson(res, 200, finalizeThreadDetailProjectionResult(
-            fallbackThreadReadResult(threadId, summary, runtimeSettings, turnsErr.message || String(turnsErr), "summary-timeout-fallback"),
-            { threadId, source: "summary-timeout-fallback" },
-          ));
-          threadLog("complete", { status: 200, mode: "summary-timeout-fallback" });
-          return;
-        }
-
-        const mode = isReadTimeoutError(turnsErr) ? "summary-timeout-fallback" : "summary-error-fallback";
-        sendJson(res, 200, finalizeThreadDetailProjectionResult(fallbackThreadReadResult(
-          threadId,
-          summary,
-          runtimeSettings,
-          `thread/read failed: ${readErr.message || String(readErr)}; thread/turns/list failed: ${turnsErr.message || String(turnsErr)}`,
-          mode,
-        ), { threadId, source: mode }));
-        threadLog("complete", { status: 200, mode });
-      }
     }
     return;
   }
@@ -15046,6 +14739,8 @@ module.exports = {
   approvalResponsePayload,
   anyThreadMatchesVisibleWorkspace,
   applyLocalActiveThreadStatusToSummary,
+  codeGraphMcpElicitationToolName,
+  codeGraphReadOnlyMcpElicitationDecision,
   clearLocalActiveThreadStatus,
   compactThread,
   enrichThreadItemTimestampsFromRollout,
@@ -15075,7 +14770,9 @@ module.exports = {
   resolvedThreadTaskCardTargetIds,
   resolveFilePreviewPath,
   attachPendingServerRequestsToResult,
+  buildThreadTaskCardCreatePayload,
   clearStaticCompressionCache,
+  createThreadTaskCardsFromSourceThread,
   publicServerRequest,
   serveFilePreviewContent,
   serveStatic,
@@ -15084,6 +14781,11 @@ module.exports = {
   staticCompressionCacheStats,
   staticCompressionEncoding,
   stripMarkdownFileTarget,
+  taskCardSourceThreadTitle,
+  threadDisplayPublicSettings,
+  setThreadDisplaySettings,
+  threadStatusChangedPayloadFromTurnNotification,
+  threadDisplayTitle,
   threadMatchesWorkspaceCwd,
   threadTaskCardCanonicalVisibleTargets,
   uploadPathForId,

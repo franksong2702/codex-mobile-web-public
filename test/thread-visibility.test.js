@@ -7,6 +7,14 @@ const path = require("node:path");
 const { test } = require("node:test");
 
 const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
+const threadDetailReadOrchestrationServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "adapters", "thread-detail-read-orchestration-service.js"),
+  "utf8",
+);
+process.env.CODEX_MOBILE_SETTINGS_FILE = path.join(os.tmpdir(), `codex-mobile-thread-visibility-settings-${process.pid}.json`);
+try {
+  fs.rmSync(process.env.CODEX_MOBILE_SETTINGS_FILE, { force: true });
+} catch (_) {}
 
 const {
   anyThreadMatchesVisibleWorkspace,
@@ -23,7 +31,12 @@ const {
   readRolloutSessionFallbackThreadFromFile,
   rememberLocalActiveThreadStatus,
   sortTurnsChronologically,
+  taskCardSourceThreadTitle,
+  threadDisplayPublicSettings,
+  threadDisplayTitle,
   threadMatchesWorkspaceCwd,
+  threadStatusChangedPayloadFromTurnNotification,
+  setThreadDisplaySettings,
 } = require("../server");
 
 function normalizeFsPath(value) {
@@ -124,6 +137,69 @@ test("thread turns cursor accepts app-server JSON cursor objects from query stri
   assert.equal(parseThreadTurnsCursor(""), null);
 });
 
+test("turn completion status broadcasts carry fresh event time for thread-list hints", () => {
+  const payload = threadStatusChangedPayloadFromTurnNotification({
+    type: "notification",
+    method: "turn/completed",
+    params: {
+      threadId: "thread-status-a",
+      turn: {
+        id: "turn-status-a",
+        status: { type: "completed" },
+        completedAtMs: 1_782_300_000_123,
+      },
+    },
+  });
+
+  assert.equal(payload.method, "thread/status/changed");
+  assert.equal(payload.params.threadId, "thread-status-a");
+  assert.deepEqual(payload.params.status, { type: "completed" });
+  assert.equal(payload.params.source, "turn/completed");
+  assert.equal(payload.params.turnId, "turn-status-a");
+  assert.equal(payload.params.eventAtMs, 1_782_300_000_123);
+});
+
+test("replayed turn completion status does not invent a fresh event time", () => {
+  const payload = threadStatusChangedPayloadFromTurnNotification({
+    type: "notification",
+    method: "turn/completed",
+    params: {
+      threadId: "thread-status-a",
+      mobileReplay: true,
+      turn: {
+        id: "turn-status-a",
+        status: { type: "completed" },
+      },
+    },
+  });
+
+  assert.equal(payload.method, "thread/status/changed");
+  assert.equal(payload.params.mobileReplay, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.params, "eventAtMs"), false);
+});
+
+test("thread display settings normalize tile mode and stable pane slots", () => {
+  const settings = setThreadDisplaySettings({
+    displayMode: "tile",
+    paneThreadIds: ["thread-a", "thread-b", "thread-a", "", "thread-c"],
+    paneCount: 4.8,
+    selectedThreadId: "thread-b",
+  });
+
+  assert.equal(settings.displayMode, "tile");
+  assert.equal(settings.threadTileMode, true);
+  assert.deepEqual(settings.paneThreadIds.slice(0, 3), ["thread-a", "thread-b", "thread-c"]);
+  assert.equal(settings.paneCount, 4);
+  assert.equal(settings.selectedThreadId, "thread-b");
+  assert.equal(threadDisplayPublicSettings().source, "runtime");
+  assert.equal(threadDisplayPublicSettings().paneCount, 4);
+});
+
+test("thread display pane count is bounded and allows automatic zero", () => {
+  assert.equal(setThreadDisplaySettings({ displayMode: "tile", paneCount: 0 }).paneCount, 0);
+  assert.equal(setThreadDisplaySettings({ displayMode: "tile", paneCount: 99 }).paneCount, 12);
+});
+
 test("thread detail uses full thread/read before bounded turns/list fallback", () => {
   assert.doesNotMatch(serverJs, /CODEX_MOBILE_THREAD_DETAIL_ROLLOUT_MAX_BYTES/);
   assert.doesNotMatch(serverJs, /THREAD_DETAIL_ROLLOUT_MAX_BYTES/);
@@ -131,9 +207,10 @@ test("thread detail uses full thread/read before bounded turns/list fallback", (
   assert.doesNotMatch(serverJs, /large-rollout-turns-list/);
   assert.doesNotMatch(serverJs, /skip_detail_rpc/);
   const routeStart = serverJs.indexOf("const threadRead = url.pathname.match");
-  const threadReadIndex = serverJs.indexOf('codex.request("thread/read", { threadId, includeTurns: true }', routeStart);
-  const turnsListIndex = serverJs.indexOf('turnsListThreadReadResult(', threadReadIndex);
-  assert.ok(threadReadIndex > routeStart, "thread detail route should call full thread/read");
+  assert.ok(serverJs.indexOf("threadDetailReadOrchestrationService.readThreadDetail", routeStart) > routeStart);
+  const threadReadIndex = threadDetailReadOrchestrationServiceJs.indexOf("await readFullThread(");
+  const turnsListIndex = threadDetailReadOrchestrationServiceJs.indexOf("await turnsListThreadReadResult(", threadReadIndex);
+  assert.ok(threadReadIndex > 0, "thread detail orchestration should call full thread/read");
   assert.ok(turnsListIndex > threadReadIndex, "bounded turns/list should stay a fallback after thread/read");
   assert.match(serverJs, /result\.thread\.mobileReadMode = "thread-read";/);
 });
@@ -144,12 +221,9 @@ test("thread detail defaults to ten turns and exposes an older cursor when compa
   assert.match(serverJs, /function olderTurnsCursorBeforeTurn\(turn\)/);
   assert.match(serverJs, /return JSON\.stringify\(\{ turnId, includeAnchor: false \}\);/);
   assert.match(serverJs, /out\.mobileOlderTurnsCursor = olderTurnsCursorBeforeTurn\(out\.turns\[0\]\);/);
-  assert.match(serverJs, /function shouldPreferRecentThreadDetail\(detailMode, summary\)/);
-  assert.match(serverJs, /String\(detailMode \|\| ""\)\.trim\(\)\.toLowerCase\(\) !== "recent"/);
-  assert.match(serverJs, /return isThreadListLiveStatus\(summary && summary\.status\);/);
-  assert.match(serverJs, /const preferRecentTurns = shouldPreferRecentThreadDetail\(detailMode, summary\);/);
-  assert.match(serverJs, /if \(preferRecentTurns\) \{/);
-  assert.match(serverJs, /"turns-list-initial"/);
+  assert.match(serverJs, /const preferRecentTurns = detailMode === "recent";/);
+  assert.match(threadDetailReadOrchestrationServiceJs, /if \(preferRecentTurns\) \{/);
+  assert.match(threadDetailReadOrchestrationServiceJs, /"turns-list-initial"/);
   assert.match(serverJs, /limit: Math\.max\(1, Math\.min\(100, Number\(url\.searchParams\.get\("limit"\) \|\| String\(MAX_THREAD_TURNS\)\)\)\)/);
 });
 
@@ -293,6 +367,25 @@ test("deferred thread list result hydrates display titles before first paint", (
 
   assert.equal(result.data[0].name, "Home AI 06-18");
   assert.equal(result.data[0].preview, "Home AI 06-18");
+});
+
+test("task-card source titles skip continuation bootstrap text", () => {
+  const threadId = "019ef506-cac2-76f2-a1df-46ed6de1e7eb";
+  const bootstrapTitle = "# Continuation Bootstrap Index\n\nThis thread is a same-workspace continuation created by Codex Mobile Web.";
+
+  assert.equal(threadDisplayTitle({
+    id: threadId,
+    name: bootstrapTitle,
+    preview: "# Continuation Bootstrap Index",
+    displayTitle: "Plugin Workspace Audit",
+  }), "Plugin Workspace Audit");
+
+  assert.equal(taskCardSourceThreadTitle(threadId, bootstrapTitle, {
+    id: threadId,
+    name: bootstrapTitle,
+    preview: "# Continuation Bootstrap Index",
+    thread_name: "Plugin Workspace Audit",
+  }), "Plugin Workspace Audit");
 });
 
 test("rollout session fallback recovers thread summary without state db text columns", () => {
@@ -658,6 +751,7 @@ test("rollout session fallback carries agent metadata so subagent rows stay hidd
 
 test("thread list route uses rollout-aware fallback aggregator", () => {
   const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
+  const cacheServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "thread-list-fallback-cache-service.js"), "utf8");
   const routeIndex = serverJs.indexOf('if (url.pathname === "/api/threads" && req.method === "GET")');
   assert.ok(routeIndex >= 0, "missing thread list route");
   const routeBody = serverJs.slice(routeIndex, serverJs.indexOf('const threadRename = url.pathname.match', routeIndex));
@@ -666,7 +760,8 @@ test("thread list route uses rollout-aware fallback aggregator", () => {
   assert.match(serverJs, /function readThreadListFallback\(/);
   assert.match(serverJs, /function logThreadList\(event, details = \{\}\)/);
   assert.match(serverJs, /const THREAD_LIST_FALLBACK_CACHE_TTL_MS[\s\S]*\|\| "0"/);
-  assert.match(serverJs, /const threadListFallbackCache = new Map\(\);/);
+  assert.match(serverJs, /createThreadListFallbackCacheService/);
+  assert.match(serverJs, /const threadListFallbackCacheService = createThreadListFallbackCacheService\(\{\s*ttlMs: THREAD_LIST_FALLBACK_CACHE_TTL_MS,/);
   assert.match(serverJs, /function clearThreadListFallbackCache\(\)/);
   assert.match(serverJs, /function upsertThreadListFallbackCacheThread\(thread, options = \{\}\)/);
   assert.match(serverJs, /function removeThreadFromThreadListFallbackCache\(threadId\)/);
@@ -676,10 +771,12 @@ test("thread list route uses rollout-aware fallback aggregator", () => {
   assert.match(serverJs, /function shouldDeferThreadListFallbackForActiveDetail\(\{ deferFallback, cursor, archived, searchTerm, cwd \} = \{\}\)/);
   assert.match(serverJs, /function threadListFallbackCacheKey\(limit, filters = \{\}\)/);
   assert.match(serverJs, /function readThreadListFallbackCache\(key\)/);
-  assert.doesNotMatch(functionBody(serverJs, "threadListFallbackCacheKey"), /fileFingerprint/);
-  assert.match(functionBody(serverJs, "readThreadListFallbackCache"), /THREAD_LIST_FALLBACK_CACHE_TTL_MS > 0/);
-  assert.match(serverJs, /diagnostics\.cacheHit = true/);
-  assert.match(serverJs, /diagnostics\.cacheIncrementalUpdates = cached\.incrementalUpdates/);
+  assert.match(serverJs, /function threadListFallbackCacheKey\(limit, filters = \{\}\) \{\s*return threadListFallbackCacheService\.cacheKey\(limit, filters\);\s*\}/);
+  assert.match(functionBody(serverJs, "readThreadListFallbackCache"), /threadListFallbackCacheService\.read\(key\)/);
+  assert.doesNotMatch(cacheServiceJs, /fileFingerprint/);
+  assert.match(cacheServiceJs, /ttlMs > 0/);
+  assert.match(cacheServiceJs, /diagnostics\.cacheHit = true/);
+  assert.match(cacheServiceJs, /diagnostics\.cacheIncrementalUpdates = cached\.incrementalUpdates/);
   assert.match(routeBody, /mobileDiagnostics[\s\S]*threadListTimings/);
   assert.match(routeBody, /fallbackCacheHit: Boolean\(fallbackDiagnostics\.cacheHit\)/);
   assert.match(routeBody, /appServerMs/);

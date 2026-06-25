@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, "..");
 const appJs = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
 const serverJs = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const stylesCss = fs.readFileSync(path.join(root, "public", "styles.css"), "utf8");
+const { createThreadDetailStatePolicy } = require(path.join(root, "public", "thread-detail-state.js"));
 
 function functionBodyFrom(source, name) {
   const start = source.indexOf(`function ${name}(`);
@@ -85,6 +86,7 @@ function evaluatedInputContentRenderer() {
 function evaluatedInputContentRendererWithKey(key = "", options = {}) {
   const sources = [
     "escapeHtml",
+    "truncateSingleLine",
     "shortPath",
     "threadTaskCardRequestMarkerMatch",
     "visibleThreadTaskCardCommandText",
@@ -120,6 +122,13 @@ function evaluatedInputContentRendererWithKey(key = "", options = {}) {
     "localAttachmentPreviewUrl",
     "imageSourceForPart",
     "compactStructuredForSignature",
+    "isInjectedThreadTaskCardMessage",
+    "injectedThreadTaskCardLineValue",
+    "injectedThreadTaskCardPurpose",
+    "injectedThreadTaskCardMetadata",
+    "injectedThreadTaskCardSummary",
+    "renderInjectedThreadTaskCardBody",
+    "renderInjectedThreadTaskCardMessage",
     "renderInputText",
     "renderInputImage",
     "renderInputAttachment",
@@ -143,94 +152,6 @@ function evaluatedLocalUserMessageItem() {
     "localUserMessageItem",
   ].map((name) => functionSourceFrom(appJs, name));
   return Function(`${sources.join("\n")}\nreturn localUserMessageItem;`)();
-}
-
-function evaluatedThreadStatusHintHarness() {
-  const sources = [
-    "numericTimestampMs",
-    "threadForStatusHint",
-    "threadViewedAtMs",
-    "markThreadViewed",
-    "noteRunningThreadHint",
-    "noteSubmittedProcessingThreadHint",
-    "clearSubmittedProcessingThreadHint",
-    "hasFreshSubmittedProcessingThreadHint",
-    "clearRunningThreadHint",
-    "threadUpdatedAtMs",
-    "threadStatusNotificationDurableEventAtMs",
-    "threadStatusNotificationEventAtMs",
-    "threadStatusFreshnessAtMs",
-    "settledStatusFreshEnoughForRunningHint",
-    "currentThreadAllowsLiveTurn",
-    "currentLiveTurnSupportsThreadStatusHint",
-    "isThreadListIdleStatus",
-    "threadLatestTerminalTurn",
-    "threadHasTerminalLatestTurn",
-    "threadLatestTerminalTurnAtMs",
-    "threadUnreadTerminalAtMs",
-    "shouldKeepRunningHintForSettledStatus",
-    "shouldMarkThreadUnread",
-    "runningThreadHintAgeMs",
-    "shouldExpireRunningThreadHint",
-    "updateThreadStatusHints",
-    "isThreadListSettledStatus",
-    "reconcileThreadStatusHints",
-    "statusIconInfo",
-  ].map((name) => functionSourceFrom(appJs, name));
-  return Function(`
-const RealDate = globalThis.Date;
-let nowMs = RealDate.now();
-const Date = { now: () => nowMs, parse: RealDate.parse };
-const STATUS_EVENT_FRESHNESS_TOLERANCE_MS = 1000;
-const RUNNING_THREAD_HINT_STALE_MS = 20 * 60 * 1000;
-const SUBMITTED_PROCESSING_HINT_STALE_MS = 60 * 1000;
-const state = {
-  threads: [],
-  currentThread: null,
-  currentThreadId: "",
-  activeTurnId: "",
-  runningThreadIds: new Set(),
-  runningThreadHintedAtById: {},
-  submittedProcessingThreadHintedAtById: {},
-  unreadThreadIds: new Set(),
-  threadViewedAtById: {},
-};
-let saveCount = 0;
-let alertCount = 0;
-function saveThreadStatusHints() { saveCount += 1; }
-function statusText(status) {
-  if (!status) return "";
-  if (typeof status === "string") return status;
-  return status.type || JSON.stringify(status);
-}
-function isStaleActiveStatus(status) {
-  if (!status || typeof status !== "object") return false;
-  return Boolean(status.mobileStaleActiveTurn || status.staleActiveTurn || status.reason === "context-only-active-turn");
-}
-function isRunningStatus(status) {
-  const text = statusText(status).toLowerCase();
-  return /(running|active|queued|processing|inprogress|in_progress|in-progress)/.test(text)
-    && !/(completed|failed|cancel|error|interrupted)/.test(text);
-}
-function isCompletedStatus(status) {
-  return /completed|failed|cancel|error|interrupted/i.test(statusText(status));
-}
-function currentLiveTurn() { return state.liveTurn || null; }
-function threadDisplayName(thread) { return thread && (thread.name || thread.id) || ""; }
-function showCompletionAlert() { alertCount += 1; }
-${sources.join("\n")}
-return {
-  state,
-  setNow(value) { nowMs = Number(value || 0); },
-  markThreadViewed,
-  updateThreadStatusHints,
-  reconcileThreadStatusHints,
-  statusIconInfo,
-  threadStatusNotificationEventAtMs,
-  saveCount: () => saveCount,
-  alertCount: () => alertCount,
-};
-`)();
 }
 
 function evaluatedActiveRuntimeHarness() {
@@ -279,6 +200,59 @@ return {
   currentLiveCandidate: () => latestLiveTurnCandidate(),
   latestIsLive: () => isLiveTurn(latestTurn()),
 };
+`)();
+}
+
+function evaluatedLiveOperationDockEntryHarness() {
+  const sources = [
+    "liveTurnStatusDockItem",
+    "currentLiveOperationEntry",
+    "latestTurnForThread",
+    "isLiveTurnForThread",
+  ].map((name) => functionSourceFrom(appJs, name));
+  return Function(`
+const state = {
+  nowMs: 2000,
+  activityAtMs: 0,
+  currentThread: null,
+};
+function isLatestTurn(turn) {
+  return Boolean(state.currentThread && Array.isArray(state.currentThread.turns)
+    && state.currentThread.turns[state.currentThread.turns.length - 1] === turn);
+}
+function isLiveTurn(turn) { return Boolean(turn && turn.live); }
+function isTurnComplete(turn) { return Boolean(turn && turn.complete); }
+function isRunningStatus(status) { return Boolean(status && (status === "running" || status.type === "active" || status.type === "running")); }
+function isIncompleteInterruptedTurn() { return false; }
+function turnHasActiveLiveItems(turn) { return Boolean(turn && turn.live); }
+function isActiveOperationalItem(item) { return Boolean(item && item.activeOperation); }
+function liveActivityLabelForTurn(turn) { return String(turn && turn.activityLabel || ""); }
+function liveTurnFallbackActivityLabel() { return "运行"; }
+function liveTurnStartedAtMs(turn) { return Number(turn && turn.startedAtMs || 0); }
+function turnStartedAtMs() { return 0; }
+${sources.join("\n")}
+return { state, currentLiveOperationEntry };
+`)();
+}
+
+function evaluatedOperationCommandHarness() {
+  const sources = [
+    "truncateSingleLine",
+    "stripMatchingOuterQuotes",
+    "operationArgumentsObject",
+    "operationCommandText",
+    "operationCommandSummary",
+    "operationCommandName",
+    "operationCommandGroupText",
+    "operationSummaryLines",
+  ].map((name) => functionSourceFrom(appJs, name));
+  return Function(`
+function shortPath(value) {
+  if (!value) return "";
+  return String(value).replace(/^\\\\\\\\\\?\\\\/, "").replace(/^.*[\\\\/]/, "");
+}
+${sources.join("\n")}
+return { operationCommandText, operationCommandSummary, operationSummaryLines };
 `)();
 }
 
@@ -518,6 +492,9 @@ function evaluatedUserMessagesLikelySame() {
     "canRenderImageAttachment",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "isTurnUsageSummaryItem",
     "dedupeTurnUsageSummaryItems",
     "normalizeComparableText",
@@ -547,6 +524,9 @@ function evaluatedMergeItemsPreservingLocalVisible() {
     "canRenderImageAttachment",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "isTurnUsageSummaryItem",
     "dedupeTurnUsageSummaryItems",
     "normalizeComparableText",
@@ -567,7 +547,6 @@ function evaluatedMergeItemsPreservingLocalVisible() {
     "userMessageSpecificity",
     "userMessagesLikelySame",
     "userMessagesCanShadow",
-    "sameUserMessageClientSubmission",
     "hasMatchingIncomingUserMessage",
     "hasMatchingRealUserMessage",
     "removeShadowedMuxUserMessages",
@@ -590,15 +569,30 @@ function evaluatedMergeItemsPreservingLocalVisible() {
     "insertLocalOnlyItemByExistingOrder",
     "mergeItemsPreservingLocalVisible",
   ].map((name) => functionSourceFrom(appJs, name));
-  return Function(`
+  return Function("createThreadDetailStatePolicy", `
 function itemVisibleWeight(item) { return JSON.stringify(item || {}).length; }
 function mergeItemPreservingVisibleFields(existingItem, incomingItem) {
   return Object.assign({}, existingItem || {}, incomingItem || {});
 }
+function isTurnComplete(turn) {
+  const text = String(turn && (turn.status && turn.status.type || turn.status) || "").toLowerCase();
+  return /completed|failed|canceled|cancelled/.test(text);
+}
+function isReasoningItem(item) { return Boolean(item && item.type === "reasoning"); }
 function dedupeTurnUsageSummaryItems(items) { return items || []; }
 ${sources.join("\n")}
+const threadDetailStatePolicy = createThreadDetailStatePolicy({
+  itemVisibleWeight,
+  isAssistantReceiptLikeItem,
+  isTurnComplete,
+  isReasoningItem,
+  visualReceiptMatchesSuppressionKeys,
+  comparableVisibleText,
+  visibleTextItemsLikelySame,
+  completedReceiptItemsLikelySame,
+});
 return mergeItemsPreservingLocalVisible;
-	`)();
+	`)(createThreadDetailStatePolicy);
 }
 
 function evaluatedMergeItemsPreservingLocalVisibleWithRealVisibleWeight() {
@@ -618,6 +612,9 @@ function evaluatedMergeItemsPreservingLocalVisibleWithRealVisibleWeight() {
     "canRenderImageAttachment",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "isTurnUsageSummaryItem",
     "dedupeTurnUsageSummaryItems",
     "normalizeComparableText",
@@ -638,7 +635,6 @@ function evaluatedMergeItemsPreservingLocalVisibleWithRealVisibleWeight() {
     "userMessageSpecificity",
     "userMessagesLikelySame",
     "userMessagesCanShadow",
-    "sameUserMessageClientSubmission",
     "hasMatchingIncomingUserMessage",
     "hasMatchingRealUserMessage",
     "removeShadowedMuxUserMessages",
@@ -667,17 +663,33 @@ function evaluatedMergeItemsPreservingLocalVisibleWithRealVisibleWeight() {
     "insertLocalOnlyItemByExistingOrder",
     "mergeItemsPreservingLocalVisible",
   ].map((name) => functionSourceFrom(appJs, name));
-  return Function(`
+  return Function("createThreadDetailStatePolicy", `
 function truncateMiddle(value) { return String(value || ""); }
 function isReasoningItem(item) { return Boolean(item && item.type === "reasoning"); }
 function isContextCompactionItem() { return false; }
 function contextCompactionNotice() { return null; }
 function isOperationalItem() { return false; }
+function isTurnComplete(turn) {
+  const text = String(turn && (turn.status && turn.status.type || turn.status) || "").toLowerCase();
+  return /completed|failed|canceled|cancelled/.test(text);
+}
 function operationDetailText() { return ""; }
 function dedupeTurnUsageSummaryItems(items) { return items || []; }
 ${sources.join("\n")}
+const threadDetailStatePolicy = createThreadDetailStatePolicy({
+  itemVisibleWeight,
+  isContextCompactionItem,
+  isOperationalItem,
+  isAssistantReceiptLikeItem,
+  isTurnComplete,
+  isReasoningItem,
+  visualReceiptMatchesSuppressionKeys,
+  comparableVisibleText,
+  visibleTextItemsLikelySame,
+  completedReceiptItemsLikelySame,
+});
 return mergeItemsPreservingLocalVisible;
-	`)();
+	`)(createThreadDetailStatePolicy);
 }
 
 function evaluatedMergeThreadPreservingVisibleItems() {
@@ -696,6 +708,9 @@ function evaluatedMergeThreadPreservingVisibleItems() {
     "canRenderImageAttachment",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "isTurnUsageSummaryItem",
     "normalizeComparableText",
     "userMessageComparableParts",
@@ -715,7 +730,6 @@ function evaluatedMergeThreadPreservingVisibleItems() {
     "userMessageSpecificity",
     "userMessagesLikelySame",
     "userMessagesCanShadow",
-    "sameUserMessageClientSubmission",
     "hasMatchingIncomingUserMessage",
     "hasMatchingRealUserMessage",
     "removeShadowedMuxUserMessages",
@@ -724,8 +738,9 @@ function evaluatedMergeThreadPreservingVisibleItems() {
     "dedupeLikelySameUserMessages",
     "userMessageHasVisualAttachment",
     "normalizeThreadVisibleUserMessages",
+    "threadUserMessageEntries",
     "shouldDropOptimisticUserMessageForDurable",
-    "shouldDropOptimisticUserMessageForOptimistic",
+    "shouldDropOptimisticUserMessageForHigherPriorityEcho",
     "threadDurableUserMessages",
     "shouldDropInitialSubmissionEchoTurn",
     "threadHasInitialSubmissionEcho",
@@ -762,7 +777,7 @@ function evaluatedMergeThreadPreservingVisibleItems() {
     "mergeTurnPreservingVisibleItems",
     "mergeThreadPreservingVisibleItems",
   ].map((name) => functionSourceFrom(appJs, name));
-  return Function(`
+  return Function("createThreadDetailStatePolicy", `
 const MAX_EXPANDED_VISIBLE_TURNS = 40;
 const state = { activeTurnId: "local-start-turn", currentThreadId: "thread-new" };
 function isReasoningItem(item) { return Boolean(item && item.type === "reasoning"); }
@@ -796,8 +811,20 @@ function turnIsSupersededBy() { return false; }
 function sortTurnsForDisplay(turns) { return turns || []; }
 function maxVisibleTurnsForThread() { return 10; }
 ${sources.join("\n")}
+const threadDetailStatePolicy = createThreadDetailStatePolicy({
+  itemVisibleWeight,
+  isContextCompactionItem,
+  isOperationalItem,
+  isAssistantReceiptLikeItem,
+  isTurnComplete,
+  isReasoningItem,
+  visualReceiptMatchesSuppressionKeys,
+  comparableVisibleText,
+  visibleTextItemsLikelySame,
+  completedReceiptItemsLikelySame,
+});
 return mergeThreadPreservingVisibleItems;
-`)();
+`)(createThreadDetailStatePolicy);
 }
 
 function evaluatedNormalizeThreadVisibleUserMessages() {
@@ -816,6 +843,9 @@ function evaluatedNormalizeThreadVisibleUserMessages() {
     "canRenderImageAttachment",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "normalizeComparableText",
     "userMessageComparableParts",
     "userMessagePathOverlap",
@@ -825,7 +855,6 @@ function evaluatedNormalizeThreadVisibleUserMessages() {
     "userMessageSpecificity",
     "userMessagesLikelySame",
     "userMessagesCanShadow",
-    "sameUserMessageClientSubmission",
     "hasMatchingRealUserMessage",
     "removeShadowedMuxUserMessages",
     "userMessageShadowPriority",
@@ -833,8 +862,9 @@ function evaluatedNormalizeThreadVisibleUserMessages() {
     "dedupeLikelySameUserMessages",
     "userMessageHasVisualAttachment",
     "normalizeThreadVisibleUserMessages",
+    "threadUserMessageEntries",
     "shouldDropOptimisticUserMessageForDurable",
-    "shouldDropOptimisticUserMessageForOptimistic",
+    "shouldDropOptimisticUserMessageForHigherPriorityEcho",
   ].map((name) => functionSourceFrom(appJs, name));
   return Function(`
 function itemVisibleWeight(item) { return JSON.stringify(item || {}).length; }
@@ -862,6 +892,9 @@ function evaluatedLiveUserMessageUpsert() {
     "canRenderImageAttachment",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "isTurnUsageSummaryItem",
     "normalizeComparableText",
     "userMessageComparableParts",
@@ -871,7 +904,6 @@ function evaluatedLiveUserMessageUpsert() {
     "userMessagePathNameOverlap",
     "userMessagesLikelySame",
     "userMessagesCanShadow",
-    "sameUserMessageClientSubmission",
     "hasMatchingRealUserMessage",
     "removeShadowedMuxUserMessages",
     "userMessageShadowPriority",
@@ -879,8 +911,9 @@ function evaluatedLiveUserMessageUpsert() {
     "dedupeLikelySameUserMessages",
     "userMessageHasVisualAttachment",
     "normalizeThreadVisibleUserMessages",
+    "threadUserMessageEntries",
     "shouldDropOptimisticUserMessageForDurable",
-    "shouldDropOptimisticUserMessageForOptimistic",
+    "shouldDropOptimisticUserMessageForHigherPriorityEcho",
     "upsertItem",
   ].map((name) => functionSourceFrom(appJs, name));
   return Function(`
@@ -930,6 +963,9 @@ function evaluatedVisibleItemsForTurn() {
     "canRenderImageAttachment",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "isTurnUsageSummaryItem",
     "normalizeComparableText",
     "userMessageComparableParts",
@@ -976,9 +1012,6 @@ return { state, visibleItemsForTurn };
 
 function evaluatedLatestTurnHelpers() {
   const sources = [
-    "isStaleActiveStatus",
-    "isThreadListSettledStatus",
-    "currentThreadAllowsLiveTurn",
     "turnHasDisplayItems",
     "latestTurn",
     "latestRawTurn",
@@ -1033,9 +1066,15 @@ function evaluatedLocalSubmissionInserter() {
     "canRenderImageAttachment",
     "localSubmittedTurnId",
     "currentThreadHasClientSubmission",
+    "threadHasClientSubmission",
+    "mutableThreadForLocalSubmission",
+    "syncLocalSubmissionThread",
     "insertLocalSubmittedUserMessage",
     "isMuxUserMessage",
     "isOptimisticUserMessage",
+    "userMessageSubmissionIdCandidates",
+    "userMessageHasSubmissionId",
+    "userMessagesShareSubmissionId",
     "isTurnUsageSummaryItem",
     "dedupeTurnUsageSummaryItems",
     "normalizeComparableText",
@@ -1054,8 +1093,9 @@ function evaluatedLocalSubmissionInserter() {
     "dedupeLikelySameUserMessages",
     "userMessageHasVisualAttachment",
     "normalizeThreadVisibleUserMessages",
+    "threadUserMessageEntries",
     "shouldDropOptimisticUserMessageForDurable",
-    "shouldDropOptimisticUserMessageForOptimistic",
+    "shouldDropOptimisticUserMessageForHigherPriorityEcho",
     "mergeSubmittedUserItemIntoTurn",
     "reconcileSubmittedUserMessageTurn",
   ].map((name) => functionSourceFrom(appJs, name));
@@ -1067,6 +1107,7 @@ const state = {
   currentThreadId: "thread-live",
   currentThread: { id: "thread-live", status: { type: "idle" }, turns: [], mobileLoading: true },
   threads: [],
+  threadTileDetails: new Map(),
 };
 function localUserMessageItem(text, attachments, clientSubmissionId) {
   return {
@@ -1083,6 +1124,7 @@ function isCompletedStatus(status) {
 }
 function mergeThreadIntoThreadList() { mergeCount += 1; }
 function syncActiveTurnFromThread() { syncCount += 1; }
+function threadById(id) { return state.threads.find((entry) => entry && entry.id === id) || null; }
 function isReasoningItem() { return false; }
 function itemVisibleWeight(item) { return JSON.stringify(item || {}).length; }
 `,
@@ -1227,6 +1269,58 @@ test("visible turn items keep source order after live operations move to the doc
   assert.match(body, /return \{ html, sourceIndex, order: 1 \};/);
   assert.match(body, /\.sort\(\(a, b\) => \(a\.sourceIndex - b\.sourceIndex\) \|\| \(a\.order - b\.order\)\)/);
   assert.match(functionBody("visibleItemsForTurn"), /if \(isOperationalItem\(item\)\) \{[\s\S]*return;/);
+});
+
+test("live operation dock keeps a status row while active turn is reasoning only", () => {
+  assert.match(appJs, /function liveTurnStatusDockItem\(turn\)/);
+  assert.match(functionBody("currentLiveOperationEntry"), /liveTurnStatusDockItem\(turn\)/);
+  assert.match(functionBody("liveTurnStatusDockItem"), /title: "Command"/);
+  assert.doesNotMatch(functionBody("liveTurnStatusDockItem"), /liveActivityLabelForTurn/);
+  assert.match(functionBody("operationTitle"), /if \(item && item\.title\) return item\.title;/);
+  assert.match(functionBody("operationSummaryLines"), /item\.type === "liveTurnStatus"/);
+  assert.match(functionBody("renderLiveOperation"), /item && item\.type === "liveTurnStatus"[\s\S]*\? ""/);
+
+  const harness = evaluatedLiveOperationDockEntryHarness();
+  const turn = {
+    id: "turn-reasoning",
+    live: true,
+    activityLabel: "思考",
+    startedAtMs: 1000,
+    items: [{ id: "reasoning-1", type: "reasoning" }],
+  };
+  harness.state.currentThread = { id: "thread-1", turns: [turn] };
+
+  const statusEntry = harness.currentLiveOperationEntry(harness.state.currentThread);
+  assert.equal(statusEntry.turn, turn);
+  assert.equal(statusEntry.sourceIndex, -1);
+  assert.equal(statusEntry.item.type, "liveTurnStatus");
+  assert.equal(statusEntry.item.title, "Command");
+  assert.equal(statusEntry.item.status, "");
+  assert.equal(statusEntry.item.startedAtMs, undefined);
+
+  const command = { id: "cmd-1", type: "commandExecution", activeOperation: true };
+  turn.items.push(command);
+  const commandEntry = harness.currentLiveOperationEntry(harness.state.currentThread);
+  assert.equal(commandEntry.item, command);
+  assert.equal(commandEntry.sourceIndex, 1);
+});
+
+test("command operation detail reads command from serialized arguments on macOS", () => {
+  assert.match(appJs, /function operationCommandText\(item\)/);
+  assert.match(functionBody("operationCommandText"), /args\.command \|\| args\.cmd \|\| args\.shellCommand \|\| args\.shell_command/);
+  assert.match(functionBody("operationCommandSummary"), /operationCommandText\(item\)/);
+  assert.match(functionBody("operationCommandName"), /operationCommandText\(item\)/);
+  assert.match(functionBody("operationSummaryLines"), /operationCommandText\(item\)/);
+  assert.match(functionBody("visibleItemSignature"), /command: operationCommandText\(item\)/);
+
+  const harness = evaluatedOperationCommandHarness();
+  const item = {
+    type: "commandExecution",
+    arguments: JSON.stringify({ cmd: "npm run check" }),
+  };
+  assert.equal(harness.operationCommandText(item), "npm run check");
+  assert.equal(harness.operationCommandSummary(item), "npm run check");
+  assert.deepEqual(harness.operationSummaryLines(item), ["npm run check"]);
 });
 
 test("superseded live usage-only shells do not render as blank completed receipts", () => {
@@ -1430,20 +1524,6 @@ test("active timer can follow an empty active tail when no display live turn exi
   assert.equal(harness.interruptDisabled(), false);
 });
 
-test("active turn sync ignores damaged live tails after thread status settles", () => {
-  const harness = evaluatedLatestTurnHelpers();
-  harness.state.currentThread.status = { type: "idle" };
-  harness.state.currentThread.turns = [
-    { id: "completed", status: "completed", completedAt: 1781141506, items: [{ id: "final", type: "agentMessage", text: "done" }] },
-    { id: "empty-active-tail", status: "inProgress", itemsView: "notLoaded", items: [] },
-  ];
-
-  harness.syncActiveTurnFromThread();
-
-  assert.equal(harness.state.activeTurnId, "");
-  assert.equal(harness.interruptDisabled(), true);
-});
-
 test("live turn keeps this session submitted durable user message after progress starts", () => {
   const harness = evaluatedVisibleItemsForTurn();
   harness.state.recentSubmittedUserMessages.set("submit-current", {
@@ -1630,7 +1710,9 @@ test("turn timer prefers live item activity over idle sync labels", () => {
   assert.match(appJs, /function liveActivityLabelForTurn\(/);
   assert.match(appJs, /function activeLiveOperationItemForTurn\(/);
   assert.match(appJs, /function currentThreadHasActiveRuntimeStatus\(/);
-  assert.match(appJs, /function activeThreadFallbackElapsedSeconds\(/);
+  assert.match(appJs, /function currentThreadTurnTimerState\(/);
+  assert.match(appJs, /function turnTimerStateFromThread\(/);
+  assert.match(appJs, /function turnTimerStateHtml\(/);
   assert.match(appJs, /function activeThreadFallbackActivityLabel\(/);
   assert.match(functionBody("liveActivityLabelForTurn"), /const operation = activeLiveOperationItemForTurn\(turn\);/);
   assert.match(functionBody("liveActivityLabelForTurn"), /if \(operation\) return activityLabelForItem\(operation\);/);
@@ -1646,8 +1728,10 @@ test("turn timer prefers live item activity over idle sync labels", () => {
   assert.match(functionBody("markIdleActivity"), /const liveTurn = currentLiveTurn\(\);/);
   assert.match(functionBody("markIdleActivity"), /if \(liveActivityLabelForTurn\(liveTurn\)\) return;/);
   assert.match(functionBody("markIdleActivity"), /if \(isIdleSyncActivityLabel\(label\) && liveTurn\) return;/);
-  assert.match(functionBody("updateTurnTimer"), /liveActivityLabelForTurn\(turn\) \|\| liveTurnFallbackActivityLabel\(turn\)/);
-  assert.match(functionBody("updateTurnTimer"), /if \(currentThreadHasActiveRuntimeStatus\(\)\) \{[\s\S]*activeThreadFallbackElapsedSeconds\(latest\)[\s\S]*activeThreadFallbackActivityLabel\(\)/);
+  assert.match(functionBody("currentThreadTurnTimerState"), /liveActivityLabelForTurn\(live\) \|\| liveTurnFallbackActivityLabel\(live\)/);
+  assert.match(functionBody("currentThreadTurnTimerState"), /activeRuntime: currentThreadHasActiveRuntimeStatus\(\)/);
+  assert.match(functionBody("currentThreadTurnTimerState"), /activeLabel: activeThreadFallbackActivityLabel\(\)/);
+  assert.match(functionBody("updateTurnTimer"), /applyTurnTimerState\(el, currentThreadTurnTimerState\(\)\)/);
   assert.match(functionBody("updateTickTimer"), /if \(!currentLiveTurn\(\) && !currentThreadHasActiveRuntimeStatus\(\)\) return;/);
   assert.match(functionBody("liveTurnFallbackActivityLabel"), /return "运行";/);
 });
@@ -1670,7 +1754,6 @@ test("loading and thread-list state preserve locally visible live turns", () => 
   assert.match(functionBody("conversationRootSignature"), /if \(threadIsLoadingWithoutVisibleTurns\(thread\)\) return `loading\\|/);
   assert.match(functionBody("renderCurrentThread"), /if \(threadIsLoadingWithoutVisibleTurns\(thread\)\) \{/);
   assert.match(functionBody("renderCurrentThread"), /const loadingNote = thread\.mobileLoading/);
-  assert.match(appJs, /function currentLiveTurnSupportsThreadStatusHint\(threadId = ""\)/);
   assert.match(functionBody("reconcileThreadStatusHints"), /currentLiveTurnSupportsThreadStatusHint\(id\)/);
   assert.match(functionBody("statusIconInfo"), /state\.runningThreadIds\.has\(id\)[\s\S]*currentLiveTurnSupportsThreadStatusHint\(id\)/);
 });
@@ -1698,11 +1781,19 @@ test("long agent messages keep a stable render path when a turn completes", () =
   assert.doesNotMatch(functionBody("applyNotification"), /renderCurrentThread\(shouldScrollToLongReceiptStart\(turn\) \? \{ scrollToTurnReceiptStart: params\.turn\.id \} : \{\}\)/);
   assert.match(functionBody("applyNotification"), /renderCurrentThread\(\{ stickToBottom: true \}\)/);
   assert.match(appJs, /function mergeVisibleTextItemPreservingRenderIdentity\(/);
-  assert.match(functionBody("mergeVisibleTextItemPreservingRenderIdentity"), /merged\.id = existingItem\.id/);
+  assert.match(functionBody("mergeVisibleTextItemPreservingRenderIdentity"), /threadDetailStatePolicy\.mergeVisibleTextItemPreservingRenderIdentity\(existingItem, incomingItem, incomingTurn\)/);
   assert.match(appJs, /function findUnusedExistingItemIndexForIncoming\(/);
   assert.match(appJs, /function mergeIncomingOrderedItem\(/);
   assert.match(functionBody("mergeItemsPreservingLocalVisible"), /for \(const incomingItem of incomingItems \|\| \[\]\)/);
   assert.match(functionBody("mergeItemsPreservingLocalVisible"), /findUnusedExistingItemIndexForIncoming\(incomingItem, existingItems \|\| \[\], usedExistingIndexes, incomingTurn\)/);
+});
+
+test("turn diagnostic items render as explicit runtime diagnostics", () => {
+  assert.match(functionBody("labelForItem"), /turnDiagnostic: "Diagnostic"/);
+  assert.match(functionBody("visibleItemSignature"), /if \(item\.type === "turnDiagnostic"\) \{/);
+  assert.match(functionBody("renderItemBody"), /if \(isTurnDiagnosticItem\(item\)\) return renderTurnDiagnostic\(item\);/);
+  assert.match(functionBody("renderTurnDiagnostic"), /runtime ended this turn without visible response content/);
+  assert.doesNotMatch(functionBody("renderTurnDiagnostic"), /renderMarkdownWithAttachmentSummary/);
 });
 
 test("agent markdown can render uploaded image summaries as thumbnails", () => {
@@ -1782,6 +1873,46 @@ test("thread task card request prompts render only the original hash command in 
   assert.match(html, /# 发给 Hermes 05-26/);
   assert.doesNotMatch(html, /codex-mobile-thread-task-card-request/);
   assert.doesNotMatch(html, /Return only one XML block/);
+});
+
+test("injected cross-thread task card user messages render collapsed", () => {
+  const renderInputContent = evaluatedInputContentRenderer();
+  const longBody = Array.from({ length: 24 }, (_, index) => `Task detail line ${index + 1}`).join("\n");
+  const html = renderInputContent([
+    {
+      type: "input_text",
+      text: [
+        "[Cross-thread task card sent by source thread]",
+        "",
+        "Source workspace: /Users/hermes-dev/HermesMobileDev/app",
+        "Source thread: Home AI 06-22",
+        "Title: Audit Music plugin workspace",
+        "Approval: target approval bypassed by the thread-callable interface.",
+        "",
+        longBody,
+      ].join("\n"),
+    },
+  ]);
+
+  assert.match(html, /class="thread-task-card-message"/);
+  assert.match(html, /data-thread-task-card-message/);
+  assert.match(html, /data-thread-task-card-standalone/);
+  assert.match(html, /<span>来源<\/span><strong>Home AI 06-22<\/strong>/);
+  assert.match(html, /<span>目的<\/span><strong>Audit Music plugin workspace<\/strong>/);
+  assert.match(html, /完整任务卡/);
+  assert.match(html, /Audit Music plugin workspace/);
+  assert.match(html, /class="thread-task-card-message-body"/);
+  assert.doesNotMatch(html, /class="input-text"/);
+});
+
+test("injected cross-thread task card items use dedicated card chrome instead of You", () => {
+  assert.match(functionBody("renderItem"), /injectedThreadTaskCardTextForItem\(item\)/);
+  assert.match(functionBody("renderInjectedThreadTaskCardItem"), /thread-task-card-injected/);
+  assert.match(functionBody("renderInjectedThreadTaskCardItem"), /data-thread-task-card-item/);
+  assert.match(functionBody("renderInjectedThreadTaskCardItem"), /来源：\$\{escapeHtml\(metadata\.source\)\}/);
+  assert.match(functionBody("renderInjectedThreadTaskCardItem"), /目的：\$\{escapeHtml\(metadata\.purpose\)\}/);
+  assert.match(stylesCss, /\.item\.thread-task-card-injected/);
+  assert.match(stylesCss, /\.thread-task-card-message-heading/);
 });
 
 test("user message text before upload summaries still renders jpg thumbnails", () => {
@@ -2626,12 +2757,17 @@ test("image view render keys include their image source", () => {
   assert.match(body, /stableTextHash\(imageSource\)/);
 });
 
-test("context compaction merge does not preserve stale mobile notices", () => {
+test("item merge delegates visible-field preservation to thread detail state policy", () => {
   const body = functionBody("mergeItemPreservingVisibleFields");
-  assert.match(body, /isContextCompactionItem\(existingItem\) \|\| isContextCompactionItem\(incomingItem\)/);
-  assert.match(body, /delete merged\.mobileNotice/);
-  assert.match(body, /delete merged\.mobileCompactionStatus/);
-  assert.match(body, /else if \(existingItem\.mobileNotice\)/);
+  assert.match(appJs, /const threadDetailStateApi = window\.CodexThreadDetailState/);
+  assert.match(appJs, /threadDetailStateApi\.createThreadDetailStatePolicy\(\{/);
+  assert.match(appJs, /comparableVisibleText,\n\s+visibleTextItemsLikelySame,\n\s+completedReceiptItemsLikelySame,/);
+  assert.match(body, /threadDetailStatePolicy\.mergeItemPreservingVisibleFields\(existingItem, incomingItem\)/);
+  assert.match(functionBody("visibleTextItemsCanShareRenderIdentity"), /threadDetailStatePolicy\.visibleTextItemsCanShareRenderIdentity\(existingItem, incomingItem, incomingTurn\)/);
+  assert.match(functionBody("mergeVisibleTextItemPreservingRenderIdentity"), /threadDetailStatePolicy\.mergeVisibleTextItemPreservingRenderIdentity\(existingItem, incomingItem, incomingTurn\)/);
+  assert.match(functionBody("completedIncomingTurnHasAuthoritativeReceipt"), /threadDetailStatePolicy\.completedIncomingTurnHasAuthoritativeReceipt\(incomingTurn\)/);
+  assert.match(functionBody("shouldDropLocalOnlyReceiptForIncomingTurn"), /threadDetailStatePolicy\.shouldDropLocalOnlyReceiptForIncomingTurn\(item, incomingTurn\)/);
+  assert.match(functionBody("shouldPreserveLocalOnlyItem"), /threadDetailStatePolicy\.shouldPreserveLocalOnlyItem\(/);
 });
 
 test("server only emits context compaction notices from explicit item state", () => {
@@ -2901,77 +3037,6 @@ test("cross-turn normalization keeps synthetic repeat when matching durable mess
   assert.equal(thread.turns[1].items[0].id, "mux-user-thread-1-turn-2-submit-2");
 });
 
-test("cross-turn normalization drops later local echo after durable message with same submission id", () => {
-  const normalizeThreadVisibleUserMessages = evaluatedNormalizeThreadVisibleUserMessages();
-  const thread = {
-    turns: [
-      {
-        id: "durable-turn",
-        status: { type: "completed" },
-        items: [{
-          id: "real-user-current",
-          type: "userMessage",
-          clientSubmissionId: "submit-current",
-          content: [{ type: "input_text", text: "好的，帮我再测一遍" }],
-        }],
-      },
-      {
-        id: "local-live-turn",
-        status: { type: "active" },
-        items: [{
-          id: "local-user-submit-current",
-          type: "userMessage",
-          mobilePendingSubmission: true,
-          clientSubmissionId: "submit-current",
-          content: [{ type: "text", text: "好的，帮我再测一遍" }],
-        }],
-      },
-    ],
-  };
-
-  normalizeThreadVisibleUserMessages(thread);
-
-  assert.equal(thread.turns[0].items.length, 1);
-  assert.equal(thread.turns[0].items[0].id, "real-user-current");
-  assert.equal(thread.turns[1].items.length, 0);
-});
-
-test("cross-turn normalization keeps mux echo over local echo with same submission id", () => {
-  const normalizeThreadVisibleUserMessages = evaluatedNormalizeThreadVisibleUserMessages();
-  const thread = {
-    turns: [
-      {
-        id: "local-turn",
-        status: { type: "active" },
-        items: [{
-          id: "local-user-submit-current",
-          type: "userMessage",
-          mobilePendingSubmission: true,
-          clientSubmissionId: "submit-current",
-          content: [{ type: "text", text: "好的，帮我再测一遍" }],
-        }],
-      },
-      {
-        id: "mux-turn",
-        status: { type: "active" },
-        items: [{
-          id: "mux-user-thread-mux-turn-submit-current",
-          type: "userMessage",
-          mobilePendingSubmission: true,
-          clientSubmissionId: "submit-current",
-          content: [{ type: "input_text", text: "好的，帮我再测一遍" }],
-        }],
-      },
-    ],
-  };
-
-  normalizeThreadVisibleUserMessages(thread);
-
-  assert.equal(thread.turns[0].items.length, 0);
-  assert.equal(thread.turns[1].items.length, 1);
-  assert.equal(thread.turns[1].items[0].id, "mux-user-thread-mux-turn-submit-current");
-});
-
 test("cross-turn normalization drops later optimistic upload image echoes after durable image appears", () => {
   const normalizeThreadVisibleUserMessages = evaluatedNormalizeThreadVisibleUserMessages();
   const uploadPath = "/Users/xuxin/.codex-mobile-web/uploads/2026-06-20/thread/1781940095858-homeai-upload-49DBCECD.jpg";
@@ -3135,6 +3200,80 @@ test("v4 projection merge preserves local pending message when server refresh ha
     "local-user-submit-current",
   ]);
   assert.equal(merged.mobileProjectionVersion, "v4");
+});
+
+test("v4 projection merge removes local pending message after matching mux echo arrives", () => {
+  const mergeThreadPreservingVisibleItems = evaluatedMergeThreadPreservingVisibleItems();
+  const existingThread = {
+    id: "thread-new",
+    turns: [{
+      id: "local-turn-submit-current",
+      status: { type: "active" },
+      items: [{
+        id: "local-user-submit-current",
+        type: "userMessage",
+        mobilePendingSubmission: true,
+        clientSubmissionId: "submit-current",
+        content: [{ type: "text", text: "current guidance" }],
+      }],
+    }],
+  };
+  const incomingThread = {
+    id: "thread-new",
+    mobileProjectionVersion: "v4",
+    mobileProjectionRevision: 3,
+    turns: [{
+      id: "real-active-turn",
+      status: { type: "active" },
+      items: [
+        {
+          id: "mux-user-thread-new-real-active-turn-submit-current",
+          type: "userMessage",
+          content: [{ type: "text", text: "current   guidance" }],
+        },
+        { id: "agent-progress", type: "agentMessage", text: "working" },
+      ],
+    }],
+  };
+
+  const merged = mergeThreadPreservingVisibleItems(existingThread, incomingThread);
+
+  assert.deepEqual(merged.turns.map((turn) => turn.id), ["real-active-turn"]);
+  assert.deepEqual(merged.turns[0].items.map((item) => item.id), [
+    "mux-user-thread-new-real-active-turn-submit-current",
+    "agent-progress",
+  ]);
+});
+
+test("cross-turn normalization keeps later local repeat when only earlier mux text matches", () => {
+  const normalizeThreadVisibleUserMessages = evaluatedNormalizeThreadVisibleUserMessages();
+  const thread = {
+    turns: [
+      {
+        id: "turn-1",
+        items: [{
+          id: "mux-user-thread-1-turn-1-submit-old",
+          type: "userMessage",
+          content: [{ type: "input_text", text: "repeat prompt" }],
+        }],
+      },
+      {
+        id: "turn-2",
+        items: [{
+          id: "local-user-submit-new",
+          type: "userMessage",
+          mobilePendingSubmission: true,
+          clientSubmissionId: "submit-new",
+          content: [{ type: "text", text: "repeat   prompt" }],
+        }],
+      },
+    ],
+  };
+
+  normalizeThreadVisibleUserMessages(thread);
+
+  assert.deepEqual(thread.turns[0].items.map((item) => item.id), ["mux-user-thread-1-turn-1-submit-old"]);
+  assert.deepEqual(thread.turns[1].items.map((item) => item.id), ["local-user-submit-new"]);
 });
 
 test("live turn merge keeps displayed assistant receipt when backfill has more stale items", () => {
@@ -3586,7 +3725,7 @@ test("thread detail pending server requests render approval cards without SSE ti
 
 test("active turn state follows only the latest durable turn", () => {
   const syncBody = functionBody("syncActiveTurnFromThread");
-  assert.match(syncBody, /const running = currentThreadAllowsLiveTurn\(\) \? latestLiveTurnCandidate\(\) : null;/);
+  assert.match(syncBody, /const running = latestLiveTurnCandidate\(\);/);
   assert.doesNotMatch(syncBody, /reverse\(\)\.find/);
 
   const candidateBody = functionBody("latestLiveTurnCandidate");
@@ -3598,7 +3737,6 @@ test("active turn state follows only the latest durable turn", () => {
 
   const liveBody = functionBody("currentLiveTurn");
   assert.match(liveBody, /const latest = latestLiveTurnCandidate\(\) \|\| latestTurn\(\);/);
-  assert.match(liveBody, /if \(!currentThreadAllowsLiveTurn\(\)\) return null;/);
   assert.match(liveBody, /const active = latest && latest\.id === state\.activeTurnId \? latest : null/);
   assert.match(liveBody, /return latest && isLiveTurn\(latest\) \? latest : null/);
   assert.doesNotMatch(liveBody, /reverse\(\)\.find/);
@@ -3611,73 +3749,38 @@ test("thread running hints survive notLoaded list refreshes", () => {
   assert.match(appJs, /function markThreadOptimisticallyActive\(/);
   assert.match(appJs, /function mergeThreadIntoThreadList\(/);
   assert.match(appJs, /const RUNNING_THREAD_HINT_STALE_MS = 20 \* 60 \* 1000;/);
-  assert.match(appJs, /const SUBMITTED_PROCESSING_HINT_STALE_MS = 60 \* 1000;/);
   assert.match(appJs, /runningThreadHintedAtById: loadNumberMapStorage\("codexMobileRunningThreadHintedAtById", \{\}\)/);
   assert.match(appJs, /threadViewedAtById: loadNumberMapStorage\("codexMobileThreadViewedAtById", \{\}\)/);
   assert.match(appJs, /submittedProcessingThreadHintedAtById: \{\}/);
   assert.match(functionBody("saveThreadStatusHints"), /saveNumberMapStorage\(STORAGE_RUNNING_THREAD_HINTED_AT, state\.runningThreadHintedAtById\)/);
   assert.match(functionBody("saveThreadStatusHints"), /saveNumberMapStorage\(STORAGE_THREAD_VIEWED_AT, state\.threadViewedAtById\)/);
-  assert.match(appJs, /function noteSubmittedProcessingThreadHint\(threadId, nowMs = Date\.now\(\)\)/);
-  assert.match(appJs, /function clearSubmittedProcessingThreadHint\(threadId\)/);
-  assert.match(appJs, /function hasFreshSubmittedProcessingThreadHint\(threadId, nowMs = Date\.now\(\)\)/);
-  assert.match(appJs, /function isThreadListIdleStatus\(status\)/);
-  assert.match(appJs, /function threadHasTerminalLatestTurn\(thread\)/);
-  assert.match(functionBody("clearRunningThreadHint"), /clearSubmittedProcessingThreadHint\(id\)/);
   assert.match(appJs, /function isThreadListSettledStatus\(status\)/);
-  assert.match(functionBody("isThreadListSettledStatus"), /idle\|completed\|complete\|done\|failed/);
+  assert.match(functionBody("isThreadListSettledStatus"), /threadStatusHintPolicy\.isSettledStatus\(status\)/);
+  assert.match(appJs, /function isThreadListTerminalStatus\(status\)/);
+  assert.match(functionBody("isThreadListTerminalStatus"), /threadStatusHintPolicy\.isTerminalStatus\(status\)/);
   assert.match(appJs, /function isStaleActiveStatus\(status\)/);
   assert.match(functionBody("isStaleActiveStatus"), /mobileStaleActiveTurn/);
-  assert.match(appJs, /function shouldMarkThreadUnread\(threadId, thread = null, status = null, options = \{\}\)/);
-  assert.match(functionBody("shouldMarkThreadUnread"), /if \(!id \|\| id === state\.currentThreadId\) return false/);
-  assert.match(appJs, /const STATUS_EVENT_FRESHNESS_TOLERANCE_MS = 1000;/);
-  assert.match(appJs, /function threadStatusNotificationEventAtMs\(params = \{\}, fallbackMs = 0, options = \{\}\)/);
-  assert.match(appJs, /function shouldKeepRunningHintForSettledStatus\(threadId, thread = null, status = null, options = \{\}\)/);
-  assert.match(appJs, /function currentThreadAllowsLiveTurn\(\)/);
-  assert.match(appJs, /function currentLiveTurnSupportsThreadStatusHint\(threadId = ""\)/);
-  assert.match(functionBody("shouldKeepRunningHintForSettledStatus"), /isThreadListIdleStatus\(nextStatus\)/);
-  assert.match(functionBody("shouldKeepRunningHintForSettledStatus"), /!threadHasTerminalLatestTurn\(thread\)/);
-  assert.match(functionBody("shouldKeepRunningHintForSettledStatus"), /hasFreshSubmittedProcessingThreadHint\(id\)/);
-  assert.match(functionBody("threadLatestTerminalTurnAtMs"), /threadStatusNotificationDurableEventAtMs\(\{ turn: latest \}\)/);
-  assert.match(functionBody("threadUnreadTerminalAtMs"), /options\.eventIsTerminal \? numericTimestampMs\(eventAtMs\) : 0/);
-  assert.match(functionBody("shouldMarkThreadUnread"), /const terminalAt = threadUnreadTerminalAtMs\(thread, options\.eventAtMs/);
-  assert.match(functionBody("shouldMarkThreadUnread"), /if \(viewedAt > 0\) return terminalAt > viewedAt/);
-  assert.match(functionBody("shouldMarkThreadUnread"), /options\.wasRunning \? threadStatusFreshnessAtMs\(thread, options\.eventAtMs\) : 0/);
-  assert.match(functionBody("shouldMarkThreadUnread"), /options\.hintedAtMs \|\| state\.runningThreadHintedAtById\[id\]/);
-  assert.match(functionBody("shouldMarkThreadUnread"), /if \(!options\.wasRunning \|\| hintedAt <= 0\) return false/);
-  assert.match(functionBody("markThreadViewed"), /state\.threadViewedAtById\[id\] = viewedAt/);
-  assert.match(functionBody("markThreadViewed"), /clearRunningThreadHint\(id\)/);
-  assert.match(functionBody("shouldExpireRunningThreadHint"), /isStaleActiveStatus\(thread && thread\.status\)/);
-  assert.match(functionBody("shouldExpireRunningThreadHint"), /shouldKeepRunningHintForSettledStatus\(id, thread, thread && thread\.status\)/);
-  assert.match(functionBody("shouldExpireRunningThreadHint"), /currentLiveTurnSupportsThreadStatusHint\(id\)/);
+  assert.match(functionBody("shouldExpireRunningThreadHint"), /threadStatusHintPolicy\.shouldExpireRunningThreadHint/);
   assert.match(functionBody("updateThreadStatusHints"), /const staleActive = isStaleActiveStatus\(nextStatus\)/);
-  assert.match(functionBody("updateThreadStatusHints"), /const hintedAtMs = Number\(state\.runningThreadHintedAtById\[id\] \|\| 0\)/);
-  assert.match(functionBody("updateThreadStatusHints"), /allowLocalProcessing: Boolean\(options\.allowLocalProcessing\)/);
   assert.match(functionBody("updateThreadStatusHints"), /shouldMarkThreadUnread\(id, nextThread, nextStatus/);
   assert.match(functionBody("statusIconInfo"), /if \(isStaleActiveStatus\(status\)\) return null;/);
-  assert.match(functionBody("statusIconInfo"), /shouldKeepRunningHintForSettledStatus\(id, hintThread, status\)/);
+  assert.match(functionBody("statusIconInfo"), /state\.runningThreadIds\.has\(id\)[\s\S]*currentLiveTurnSupportsThreadStatusHint\(id\)/);
   assert.match(functionBody("reconcileThreadStatusHints"), /const staleActive = isStaleActiveStatus\(thread\.status\) \|\| Boolean\(thread\.mobileStaleActiveTurn\)/);
   assert.match(functionBody("reconcileThreadStatusHints"), /const isRunning = !staleActive && isRunningStatus\(thread\.status\)/);
   assert.match(functionBody("reconcileThreadStatusHints"), /else if \(wasRunning && staleActive\)/);
-  assert.match(functionBody("reconcileThreadStatusHints"), /if \(state\.unreadThreadIds\.delete\(id\)\) changed = true;/);
   assert.match(functionBody("reconcileThreadStatusHints"), /else if \(wasRunning && isThreadListSettledStatus\(thread\.status\)\)/);
-  assert.match(functionBody("reconcileThreadStatusHints"), /currentLiveTurnSupportsThreadStatusHint\(id\)/);
-  assert.match(functionBody("reconcileThreadStatusHints"), /shouldKeepRunningHintForSettledStatus\(id, thread, thread\.status/);
-  assert.match(functionBody("reconcileThreadStatusHints"), /shouldMarkThreadUnread\(id, thread, thread\.status/);
   assert.match(functionBody("reconcileThreadStatusHints"), /shouldExpireRunningThreadHint\(id, thread, nowMs\)/);
   assert.doesNotMatch(functionBody("reconcileThreadStatusHints"), /else if \(!isRunning && wasRunning\)/);
 
   const listMergeBody = functionBody("mergeThreadIntoThreadList");
   assert.match(listMergeBody, /threadListSummaryFromDetailThread\(thread\)/);
-  assert.match(listMergeBody, /isRunningStatus\(summary\.status\)[\s\S]*state\.unreadThreadIds\.delete\(id\)/);
-  assert.match(listMergeBody, /threadHasTerminalLatestTurn\(thread\)/);
-  assert.match(listMergeBody, /clearRunningThreadHint\(id\)/);
   assert.match(listMergeBody, /Object\.assign\(\{\}, entry, summary\)/);
   const optimisticBody = functionBody("markThreadOptimisticallyActive");
   assert.match(optimisticBody, /const runningStatus = \{ type: "active" \};/);
   assert.match(optimisticBody, /noteSubmittedProcessingThreadHint\(id\)/);
   assert.match(optimisticBody, /updateThreadStatusHints\(id, previousStatus, runningStatus/);
   assert.match(optimisticBody, /updateThreadListStatus\(id, runningStatus\)/);
-  assert.match(optimisticBody, /mergeThreadIntoThreadList\(state\.currentThread\)/);
+  assert.match(optimisticBody, /if \(currentMatches\) \{[\s\S]*mergeThreadIntoThreadList\(state\.currentThread\)/);
   const restoreBody = functionBody("restoreThreadStatusSnapshot");
   assert.match(restoreBody, /updateThreadStatusHints\(id, \{ type: "active" \}, restoredStatus/);
   assert.match(restoreBody, /state\.currentThread\.status = snapshot\.currentStatus/);
@@ -3685,23 +3788,25 @@ test("thread running hints survive notLoaded list refreshes", () => {
   assert.match(functionBody("refreshCurrentThread"), /state\.currentThread = mergeThreadPreservingVisibleItems\(state\.currentThread, result\.thread\);[\s\S]*mergeThreadIntoThreadList\(state\.currentThread\);/);
   assert.match(functionBody("backfillFullThreadDetail"), /state\.currentThread = mergeThreadPreservingVisibleItems\(state\.currentThread, result\.thread\);\s*mergeThreadIntoThreadList\(state\.currentThread\);/);
   const sendBody = functionBody("sendMessage");
-  assert.match(sendBody, /const previousThreadStatus = snapshotThreadStatus\(state\.currentThreadId\);/);
-  assert.match(sendBody, /registerSubmittedUserMessage\(state\.currentThreadId, outboundText, submittedAttachments, clientSubmissionId\);\s*const insertedLocalMessage = insertLocalSubmittedUserMessage/);
+  assert.match(sendBody, /const targetThreadId = currentComposerThreadId\(\);/);
+  assert.match(sendBody, /const previousThreadStatus = snapshotThreadStatus\(targetThreadId\);/);
+  assert.match(sendBody, /registerSubmittedUserMessage\(targetThreadId, outboundText, submittedAttachments, clientSubmissionId\);\s*const insertedLocalMessage = insertLocalSubmittedUserMessage/);
   assert.match(sendBody, /if \(insertedLocalMessage\) renderCurrentThread\(\{ stickToBottom: true \}\);/);
-  assert.match(sendBody, /const result = await api\(`\/api\/threads\/\$\{encodeURIComponent\(state\.currentThreadId\)\}\/messages`/);
+  assert.match(sendBody, /const result = await api\(`\/api\/threads\/\$\{encodeURIComponent\(targetThreadId\)\}\/messages`/);
   assert.match(sendBody, /const serverTurnId = startedTurnId\(result\);/);
-  assert.match(sendBody, /if \(!steering && serverTurnId && reconcileSubmittedUserMessageTurn\(state\.currentThreadId, clientSubmissionId, serverTurnId\)\)/);
+  assert.match(sendBody, /if \(!steering && serverTurnId && reconcileSubmittedUserMessageTurn\(targetThreadId, clientSubmissionId, serverTurnId\)\)/);
   assert.match(sendBody, /if \(!steering\) \{[\s\S]*restoreThreadStatusSnapshot\(previousThreadStatus\);[\s\S]*renderThreads\(\);[\s\S]*\}/);
 
   const taskCardSendBody = functionBody("sendThreadTaskCardCommand");
-  assert.match(taskCardSendBody, /const result = await api\(`\/api\/threads\/\$\{encodeURIComponent\(state\.currentThreadId\)\}\/messages`/);
+  assert.match(taskCardSendBody, /const targetThreadId = currentComposerThreadId\(\);/);
+  assert.match(taskCardSendBody, /const result = await api\(`\/api\/threads\/\$\{encodeURIComponent\(targetThreadId\)\}\/messages`/);
   assert.match(taskCardSendBody, /const serverTurnId = startedTurnId\(result\);/);
-  assert.match(taskCardSendBody, /if \(serverTurnId && reconcileSubmittedUserMessageTurn\(state\.currentThreadId, clientSubmissionId, serverTurnId\)\)/);
+  assert.match(taskCardSendBody, /if \(serverTurnId && reconcileSubmittedUserMessageTurn\(targetThreadId, clientSubmissionId, serverTurnId\)\)/);
   assert.doesNotMatch(taskCardSendBody, /!steering/);
 
   const expireBody = functionBody("shouldExpireRunningThreadHint");
-  assert.match(expireBody, /id === state\.currentThreadId && state\.activeTurnId && currentLiveTurnSupportsThreadStatusHint\(id\)/);
-  assert.match(expireBody, /runningThreadHintAgeMs\(id, thread, nowMs\) > RUNNING_THREAD_HINT_STALE_MS/);
+  assert.match(expireBody, /currentThreadHasLiveTurn: currentLiveTurnSupportsThreadStatusHint\(id\)/);
+  assert.match(expireBody, /runningHintStaleMs: RUNNING_THREAD_HINT_STALE_MS/);
 
   const notificationBody = functionBody("applyNotification");
   assert.match(notificationBody, /const runningStatus = \{ type: "active" \};/);
@@ -3709,362 +3814,9 @@ test("thread running hints survive notLoaded list refreshes", () => {
   assert.match(notificationBody, /updateThreadListStatus\(params\.threadId, runningStatus\)/);
   assert.match(notificationBody, /const completedStatus = \(params\.turn && params\.turn\.status\) \|\| \{ type: "completed" \};/);
   assert.match(notificationBody, /updateThreadStatusHints\(params\.threadId, state\.currentThread\.status, completedStatus/);
-  assert.match(notificationBody, /threadStatusNotificationEventAtMs\(params, Date\.now\(\), \{[\s\S]*allowReplayReceivedAt/);
   assert.match(notificationBody, /updateThreadListStatus\(params\.threadId, completedStatus\)/);
   assert.match(notificationBody, /scheduleRenderThreads\(\);[\s\S]*scheduleCurrentThreadRefresh\(500\)/);
   assert.match(notificationBody, /scheduleRenderThreads\(\);[\s\S]*schedulePostCompletionThreadRefreshes\(params\.threadId, \[700, 2400\]\)/);
-});
-
-test("submitted processing hint keeps spinner through fresh idle list refresh", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = 1_700_000_000_000;
-  harness.setNow(now);
-  harness.state.runningThreadIds.add("thread-submitted");
-  harness.state.runningThreadHintedAtById["thread-submitted"] = now;
-  harness.state.submittedProcessingThreadHintedAtById["thread-submitted"] = now;
-  const freshIdleThread = {
-    id: "thread-submitted",
-    status: { type: "idle" },
-    updatedAtMs: now + 500,
-  };
-  harness.state.threads = [freshIdleThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-submitted"), true);
-  assert.equal(harness.state.unreadThreadIds.has("thread-submitted"), false);
-  assert.equal(harness.statusIconInfo(freshIdleThread.status, "thread-submitted").kind, "running");
-});
-
-test("active list rows clear stale unread dots even when already running", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = 1_700_000_000_000;
-  harness.setNow(now);
-  harness.state.runningThreadIds.add("thread-active-unread");
-  harness.state.runningThreadHintedAtById["thread-active-unread"] = now - 5000;
-  harness.state.unreadThreadIds.add("thread-active-unread");
-  const activeThread = {
-    id: "thread-active-unread",
-    status: { type: "active" },
-    updatedAtMs: now,
-  };
-  harness.state.threads = [activeThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-active-unread"), true);
-  assert.equal(harness.state.unreadThreadIds.has("thread-active-unread"), false);
-  assert.equal(harness.statusIconInfo(activeThread.status, "thread-active-unread").kind, "running");
-  assert.equal(harness.saveCount(), 1);
-});
-
-test("submitted processing hint does not preserve completed list rows", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = 1_700_000_000_000;
-  harness.setNow(now);
-  harness.state.runningThreadIds.add("thread-submitted-done");
-  harness.state.runningThreadHintedAtById["thread-submitted-done"] = now;
-  harness.state.submittedProcessingThreadHintedAtById["thread-submitted-done"] = now;
-  const completedThread = {
-    id: "thread-submitted-done",
-    status: { type: "completed" },
-    updatedAtMs: now + 500,
-  };
-  harness.state.threads = [completedThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-submitted-done"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(harness.state.submittedProcessingThreadHintedAtById, "thread-submitted-done"), false);
-  assert.equal(harness.state.unreadThreadIds.has("thread-submitted-done"), true);
-  assert.equal(harness.statusIconInfo(completedThread.status, "thread-submitted-done").kind, "unread");
-});
-
-test("submitted processing hint does not preserve terminal detail with idle top-level status", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = 1_700_000_000_000;
-  harness.setNow(now);
-  harness.state.runningThreadIds.add("thread-submitted-idle-done");
-  harness.state.runningThreadHintedAtById["thread-submitted-idle-done"] = now;
-  harness.state.submittedProcessingThreadHintedAtById["thread-submitted-idle-done"] = now;
-  const completedIdleThread = {
-    id: "thread-submitted-idle-done",
-    status: { type: "idle" },
-    updatedAtMs: now + 500,
-    turns: [{ id: "turn-done", status: "completed" }],
-  };
-  harness.state.threads = [completedIdleThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-submitted-idle-done"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(harness.state.submittedProcessingThreadHintedAtById, "thread-submitted-idle-done"), false);
-  assert.equal(harness.state.unreadThreadIds.has("thread-submitted-idle-done"), true);
-  assert.equal(harness.statusIconInfo(completedIdleThread.status, "thread-submitted-idle-done").kind, "unread");
-});
-
-test("submitted processing hint expires before the normal running hint window", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const submittedAt = 1_700_000_000_000;
-  harness.setNow(submittedAt + 61_000);
-  harness.state.runningThreadIds.add("thread-submitted-expired");
-  harness.state.runningThreadHintedAtById["thread-submitted-expired"] = submittedAt;
-  harness.state.submittedProcessingThreadHintedAtById["thread-submitted-expired"] = submittedAt;
-  const idleThread = {
-    id: "thread-submitted-expired",
-    status: { type: "idle" },
-    updatedAtMs: submittedAt + 61_000,
-  };
-  harness.state.threads = [idleThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-submitted-expired"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(harness.state.submittedProcessingThreadHintedAtById, "thread-submitted-expired"), false);
-  assert.equal(harness.state.unreadThreadIds.has("thread-submitted-expired"), true);
-  assert.equal(harness.statusIconInfo(idleThread.status, "thread-submitted-expired").kind, "unread");
-});
-
-test("stale settled list rows do not clear fresh running hints", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = Date.now();
-  harness.state.runningThreadIds.add("thread-active");
-  harness.state.runningThreadHintedAtById["thread-active"] = now;
-  const staleSettledThread = {
-    id: "thread-active",
-    status: { type: "completed" },
-    updatedAtMs: now - 10_000,
-  };
-  harness.state.threads = [staleSettledThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-active"), true);
-  assert.equal(harness.state.unreadThreadIds.has("thread-active"), false);
-  assert.equal(harness.statusIconInfo(staleSettledThread.status, "thread-active").kind, "running");
-
-  harness.markThreadViewed("thread-active", staleSettledThread, now + 1000);
-  assert.equal(harness.state.runningThreadIds.has("thread-active"), true);
-});
-
-test("settled current thread detail clears damaged running hints", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = 1_700_000_000_000;
-  harness.setNow(now);
-  harness.state.currentThreadId = "thread-current";
-  harness.state.currentThread = {
-    id: "thread-current",
-    status: { type: "idle" },
-  };
-  harness.state.liveTurn = { id: "turn-damaged", status: { type: "inProgress" } };
-  harness.state.activeTurnId = "turn-damaged";
-  harness.state.runningThreadIds.add("thread-current");
-  harness.state.runningThreadHintedAtById["thread-current"] = now;
-  const settledThread = {
-    id: "thread-current",
-    status: { type: "idle" },
-    updatedAtMs: now - 10_000,
-  };
-  harness.state.threads = [settledThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-current"), false);
-  assert.equal(harness.state.unreadThreadIds.has("thread-current"), false);
-  assert.equal(harness.statusIconInfo(settledThread.status, "thread-current"), null);
-});
-
-test("old stale settled list rows expire running hints", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = 1_700_000_000_000;
-  const hintedAt = now - (21 * 60 * 1000);
-  harness.setNow(now);
-  harness.state.runningThreadIds.add("thread-old-settled");
-  harness.state.runningThreadHintedAtById["thread-old-settled"] = hintedAt;
-  const staleSettledThread = {
-    id: "thread-old-settled",
-    status: { type: "completed" },
-    updatedAtMs: hintedAt - 10_000,
-  };
-  harness.state.threads = [staleSettledThread];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-old-settled"), false);
-  assert.equal(harness.state.unreadThreadIds.has("thread-old-settled"), false);
-  assert.equal(harness.statusIconInfo(staleSettledThread.status, "thread-old-settled"), null);
-});
-
-test("fresh terminal status marks background running threads unread", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const now = Date.now();
-  harness.state.runningThreadIds.add("thread-background");
-  harness.state.runningThreadHintedAtById["thread-background"] = now - 5000;
-  harness.state.threads = [{
-    id: "thread-background",
-    status: { type: "active" },
-    updatedAtMs: now - 5000,
-  }];
-
-  harness.updateThreadStatusHints("thread-background", { type: "active" }, { type: "completed" }, {
-    thread: { id: "thread-background", status: { type: "active" }, updatedAtMs: now },
-    eventAtMs: now,
-    notify: true,
-  });
-
-  assert.equal(harness.state.runningThreadIds.has("thread-background"), false);
-  assert.equal(harness.state.unreadThreadIds.has("thread-background"), true);
-  assert.equal(harness.alertCount(), 1);
-});
-
-test("terminal status events mark viewed background threads unread", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  harness.state.threadViewedAtById["thread-terminal-event"] = 10_000;
-  harness.state.threads = [{
-    id: "thread-terminal-event",
-    status: { type: "idle" },
-    updatedAtMs: 10_000,
-  }];
-
-  harness.updateThreadStatusHints("thread-terminal-event", { type: "idle" }, { type: "completed" }, {
-    thread: { id: "thread-terminal-event", status: { type: "idle" }, updatedAtMs: 10_000 },
-    eventAtMs: 12_000,
-    notify: true,
-  });
-
-  assert.equal(harness.state.unreadThreadIds.has("thread-terminal-event"), true);
-  assert.equal(harness.alertCount(), 1);
-});
-
-test("rename-only settled list timestamps do not create unread after a thread was viewed", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  harness.state.threadViewedAtById["thread-renamed"] = 10_000;
-  harness.state.threads = [{
-    id: "thread-renamed",
-    name: "Renamed",
-    status: { type: "idle" },
-    updatedAtMs: 12_000,
-  }];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.unreadThreadIds.has("thread-renamed"), false);
-});
-
-test("rename-only settled list timestamps do not convert stale running hints into unread after viewed", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  harness.state.threadViewedAtById["thread-renamed-running"] = 10_000;
-  harness.state.runningThreadIds.add("thread-renamed-running");
-  harness.state.runningThreadHintedAtById["thread-renamed-running"] = 8000;
-  harness.state.threads = [{
-    id: "thread-renamed-running",
-    name: "Renamed",
-    status: { type: "idle" },
-    updatedAtMs: 12_000,
-  }];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.runningThreadIds.has("thread-renamed-running"), false);
-  assert.equal(harness.state.unreadThreadIds.has("thread-renamed-running"), false);
-});
-
-test("terminal latest turns still create unread after a thread was viewed", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  harness.state.threadViewedAtById["thread-terminal-turn"] = 10_000;
-  harness.state.threads = [{
-    id: "thread-terminal-turn",
-    status: { type: "idle" },
-    updatedAtMs: 12_000,
-    turns: [{
-      id: "turn-terminal",
-      status: { type: "completed" },
-      completedAt: 12_000,
-    }],
-  }];
-
-  harness.reconcileThreadStatusHints(harness.state.threads);
-
-  assert.equal(harness.state.unreadThreadIds.has("thread-terminal-turn"), true);
-});
-
-test("replayed old terminal status does not recreate unread after a thread was viewed", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const viewedAt = Date.now();
-  harness.state.threadViewedAtById["thread-viewed"] = viewedAt;
-
-  harness.updateThreadStatusHints("thread-viewed", { type: "completed" }, { type: "completed" }, {
-    thread: { id: "thread-viewed", status: { type: "completed" }, updatedAtMs: viewedAt - 30_000 },
-    eventAtMs: viewedAt - 30_000,
-    notify: true,
-  });
-
-  assert.equal(harness.state.unreadThreadIds.has("thread-viewed"), false);
-  assert.equal(harness.alertCount(), 0);
-});
-
-test("server-updated timestamps do not inflate local thread viewed time", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  harness.setNow(10_000);
-  harness.state.runningThreadIds.add("thread-clock");
-  harness.state.runningThreadHintedAtById["thread-clock"] = 9000;
-  const futureServerThread = {
-    id: "thread-clock",
-    status: { type: "completed" },
-    updatedAtMs: 60_000,
-  };
-
-  harness.markThreadViewed("thread-clock", futureServerThread);
-
-  assert.equal(harness.state.threadViewedAtById["thread-clock"], 10_000);
-
-  harness.updateThreadStatusHints("thread-clock", { type: "active" }, { type: "completed" }, {
-    thread: { id: "thread-clock", status: { type: "active" }, updatedAtMs: 11_000 },
-    eventAtMs: 11_000,
-    notify: true,
-  });
-
-  assert.equal(harness.state.unreadThreadIds.has("thread-clock"), true);
-});
-
-test("replayed stale terminal status does not use tolerance to clear fresh running hints", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  const hintedAt = 1_700_000_000_000;
-  harness.state.runningThreadIds.add("thread-replay-old");
-  harness.state.runningThreadHintedAtById["thread-replay-old"] = hintedAt;
-
-  harness.updateThreadStatusHints("thread-replay-old", { type: "active" }, { type: "completed" }, {
-    thread: { id: "thread-replay-old", status: { type: "active" } },
-    eventAtMs: hintedAt - 500,
-    mobileReplay: true,
-    notify: true,
-  });
-
-  assert.equal(harness.state.runningThreadIds.has("thread-replay-old"), true);
-  assert.equal(harness.state.unreadThreadIds.has("thread-replay-old"), false);
-  assert.equal(harness.alertCount(), 0);
-});
-
-test("replayed terminal status without durable event time does not use replay receipt as completion time", () => {
-  const harness = evaluatedThreadStatusHintHarness();
-  harness.state.runningThreadIds.add("thread-replay-missing-time");
-  harness.state.runningThreadHintedAtById["thread-replay-missing-time"] = 1000;
-
-  assert.equal(harness.threadStatusNotificationEventAtMs({
-    mobileReplay: true,
-    mobileReplayReceivedAtMs: 5000,
-  }, 0, { allowReplayReceivedAt: false }), 0);
-
-  harness.updateThreadStatusHints("thread-replay-missing-time", { type: "active" }, { type: "completed" }, {
-    thread: { id: "thread-replay-missing-time", status: { type: "active" } },
-    eventAtMs: 0,
-    mobileReplay: true,
-    notify: true,
-  });
-
-  assert.equal(harness.state.runningThreadIds.has("thread-replay-missing-time"), true);
-  assert.equal(harness.state.unreadThreadIds.has("thread-replay-missing-time"), false);
-  assert.equal(harness.alertCount(), 0);
 });
 
 test("thread merge drops superseded stale active turns", () => {
@@ -4072,86 +3824,6 @@ test("thread merge drops superseded stale active turns", () => {
   assert.match(functionBody("turnIsSupersededBy"), /return isTurnComplete\(newerTurn\) && !isTurnComplete\(turn\)/);
   assert.match(functionBody("mergeThreadPreservingVisibleItems"), /const latestIncoming = merged\.turns\.length \? merged\.turns\[merged\.turns\.length - 1\] : null/);
   assert.match(functionBody("mergeThreadPreservingVisibleItems"), /if \(turnIsSupersededBy\(existingTurn, latestIncoming\)\) continue/);
-});
-
-test("v4 projection refresh preserves an already rendered final answer", () => {
-  const mergeThreadPreservingVisibleItems = evaluatedMergeThreadPreservingVisibleItems();
-  const existingThread = {
-    id: "thread-v4",
-    turns: [{
-      id: "turn-1",
-      status: { type: "completed" },
-      items: [
-        { id: "user-1", type: "userMessage", content: [{ type: "text", text: "question" }] },
-        { id: "agent-final", type: "agentMessage", text: "Final Answer" },
-      ],
-    }],
-  };
-  const incomingThread = {
-    id: "thread-v4",
-    mobileProjectionVersion: "v4",
-    turns: [{
-      id: "turn-1",
-      status: { type: "completed" },
-      items: [
-        { id: "user-1", type: "userMessage", content: [{ type: "text", text: "question" }] },
-      ],
-    }],
-  };
-  const merged = mergeThreadPreservingVisibleItems(existingThread, incomingThread);
-  assert.equal(merged.turns.length, 1);
-  assert.ok(merged.turns[0].items.some((item) => item.type === "agentMessage" && item.text === "Final Answer"));
-  assert.match(functionBody("mergeV4ProjectionThread"), /mergeTurnPreservingVisibleItems\(existingTurn, incomingTurn\)/);
-});
-
-test("enriched projection refresh clears deferred enrichment without dropping final answer", () => {
-  const mergeThreadPreservingVisibleItems = evaluatedMergeThreadPreservingVisibleItems();
-  const existingThread = {
-    id: "thread-v4",
-    mobileDeferredEnrichment: true,
-    mobileDeferredEnrichmentReason: "large-rollout-first-paint",
-    turns: [{
-      id: "turn-1",
-      status: { type: "completed" },
-      items: [
-        { id: "user-1", type: "userMessage", content: [{ type: "text", text: "question" }] },
-        { id: "agent-final", type: "agentMessage", text: "Final Answer" },
-      ],
-    }],
-  };
-  const enrichedProjection = {
-    id: "thread-v4",
-    mobileProjectionVersion: "v4",
-    turns: [{
-      id: "turn-1",
-      status: { type: "completed" },
-      items: [
-        { id: "user-1", type: "userMessage", content: [{ type: "text", text: "question" }] },
-        { id: "usage-1", type: "turnUsageSummary", text: "Usage" },
-      ],
-    }],
-  };
-
-  const merged = mergeThreadPreservingVisibleItems(existingThread, enrichedProjection);
-
-  assert.equal(merged.mobileDeferredEnrichment, undefined);
-  assert.equal(merged.mobileDeferredEnrichmentReason, undefined);
-  assert.ok(merged.turns[0].items.some((item) => item.type === "agentMessage" && item.text === "Final Answer"));
-  assert.ok(merged.turns[0].items.some((item) => item.type === "turnUsageSummary"));
-  assert.match(functionBody("mergeV4ProjectionThread"), /delete merged\.mobileDeferredEnrichment;/);
-  assert.match(functionBody("mergeThreadPreservingVisibleItems"), /delete merged\.mobileDeferredEnrichment;/);
-});
-
-test("settled thread detail loads avoid recent projections that can omit final receipts", () => {
-  assert.match(appJs, /function shouldUseRecentThreadDetail\(thread\)/);
-  assert.match(functionBody("shouldUseRecentThreadDetail"), /return isRunningStatus\(thread && thread\.status\);/);
-  assert.match(functionBody("loadThread"), /threadDetailApiPath\(threadId, shouldUseRecentThreadDetail\(summary\) \? \{ mode: "recent" \} : \{\}\)/);
-  assert.match(functionBody("refreshCurrentThread"), /\|\| !shouldUseRecentThreadDetail\(state\.currentThread\)\s*\?\s*"full"\s*:\s*"recent"/);
-  assert.match(appJs, /function scheduleDeferredEnrichmentRefresh\(thread, delay = 350\)/);
-  assert.match(functionBody("scheduleDeferredEnrichmentRefresh"), /refreshCurrentThread\(\{ source: "deferred-enrichment", full: true, enrich: true \}\)\.catch\(showError\);/);
-  assert.match(functionBody("refreshCurrentThread"), /if \(options\.enrich === true\) detailParams\.enrich = "1";/);
-  assert.match(functionBody("refreshCurrentThread"), /if \(options\.enrich !== true\) scheduleDeferredEnrichmentRefresh\(state\.currentThread\);/);
-  assert.match(functionBody("backfillFullThreadDetail"), /threadDetailApiPath\(id, \{ enrich: "1" \}\)/);
 });
 
 test("completed turns can render context and token usage summaries", () => {

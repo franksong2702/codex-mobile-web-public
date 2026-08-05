@@ -500,6 +500,10 @@ html.embed-hermes .app {
   transform: translateY(var(--app-top, 0px));
 }
 
+html.keyboard-open:not(.embed-hermes) .app {
+  min-height: 0;
+}
+
 html.embed-hermes.thread-tile-open.keyboard-open .app {
   transform: none;
 }

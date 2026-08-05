@@ -269,6 +269,7 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(stylesCss, /body\s*{[\s\S]*min-height:\s*-webkit-fill-available;/);
   assert.match(stylesCss, /html\.embed-hermes \.app\s*{[\s\S]*height:\s*var\(--app-height, 100dvh\);/);
   assert.match(stylesCss, /html\.embed-hermes \.app\s*{[\s\S]*min-height:\s*0;/);
+  assert.match(stylesCss, /html\.keyboard-open:not\(\.embed-hermes\) \.app\s*{[\s\S]*min-height:\s*0;/);
   assert.match(stylesCss, /html\.embed-hermes \.app\s*{[\s\S]*transform:\s*translateY\(var\(--app-top, 0px\)\);/);
   assert.match(stylesCss, /\.app\.resume-repaint\s*{[\s\S]*transform:\s*translateY\(var\(--app-top, 0px\)\) translateZ\(0\);/);
   assert.match(stylesCss, /--host-top-safe-area:\s*0px;/);

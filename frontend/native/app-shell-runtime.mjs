@@ -444,6 +444,7 @@ function wireUi() {
   if (pageRefreshPrompt) pageRefreshPrompt.addEventListener("click", refreshPageForNewBuild);
   $("composer").addEventListener("submit", sendMessage);
   const sendButton = $("sendMessage");
+  sendButton.addEventListener("pointerup", requestComposerSubmitFromButton);
   sendButton.addEventListener("click", requestComposerSubmitFromButton);
   $("interruptTurn").addEventListener("click", interruptActiveTurn);
   if ($("scrollToBottom")) $("scrollToBottom").addEventListener("click", () => {

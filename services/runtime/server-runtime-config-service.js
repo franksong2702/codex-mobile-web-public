@@ -57,7 +57,7 @@ function createServerRuntimeConfigService(dependencies = {}) {
     : ({ defaultCodexHome }) => ({ codexHome: defaultCodexHome || "" });
   const normalizeRepositorySlug = typeof dependencies.normalizeRepositorySlug === "function"
     ? dependencies.normalizeRepositorySlug
-    : (value, fallback = "pentiumxp/codex-mobile-web-public") => String(value || fallback || "").trim();
+    : (value, fallback = "franksong2702/codex-mobile-web-public") => String(value || fallback || "").trim();
 
   function resolve() {
     const RUNTIME_ROOT = env.CODEX_MOBILE_RUNTIME_DIR || path.join(userHome, ".codex-mobile-web");
@@ -77,7 +77,7 @@ function createServerRuntimeConfigService(dependencies = {}) {
     const CODEX_HOME = CODEX_HOME_RESOLUTION.codexHome;
     const APP_VERSION = readPackageVersion();
     const PUBLIC_PR_REPOSITORY = normalizeRepositorySlug(
-      env.CODEX_MOBILE_PUBLIC_PR_REPOSITORY || "pentiumxp/codex-mobile-web-public",
+      env.CODEX_MOBILE_PUBLIC_PR_REPOSITORY || "franksong2702/codex-mobile-web-public",
     );
     const THREAD_SIDE_CHAT_SCOPE_ID = CODEX_HOME_RESOLUTION.activeProfileId
       || `codex-home-${crypto.createHash("sha256").update(CODEX_HOME).digest("hex").slice(0, 16)}`;

@@ -9,6 +9,12 @@ Codex 线程，支持移动端查看线程、发送消息、上传图片和文�
 Web Push/Action Inbox 通知，以及与 Codex Desktop 共享 app-server
 mux 的实时同步。
 
+本仓库的 canonical 产品线是
+[`franksong2702/codex-mobile-web-public`](https://github.com/franksong2702/codex-mobile-web-public)
+的 `main` 分支。`pentiumxp/codex-mobile-web-public` 仅作为可选 upstream
+参考源；本项目不会自动合并或自动发布 upstream 变更。完整规则见
+[`docs/FORK_GOVERNANCE.md`](docs/FORK_GOVERNANCE.md)。
+
 这个仓库的近期工作重点不是增加单点功能，而是修复长期演进后暴露出的
 架构问题：线程详情投影、线程列表内存缓存、跨线程任务卡、移动端
 Composer/operation 状态、Home AI 插件嵌入和 public 发布流程都已经变成
@@ -9063,7 +9069,7 @@ thread. `#` task-card commands still reject attachments for now.
 ## Clone And Validate
 
 ```bash
-git clone https://github.com/pentiumxp/codex-mobile-web-public.git
+git clone https://github.com/franksong2702/codex-mobile-web-public.git
 cd codex-mobile-web-public
 npm ci
 npm run check
@@ -10786,7 +10792,9 @@ VAPID details:
 | `CODEX_MOBILE_UPDATE_CHECK_TIMEOUT_MS` | Timeout for update-check Git commands, default `15000`. |
 | `CODEX_MOBILE_UPDATE_APPLY_TIMEOUT_MS` | Timeout for the fast-forward update command, default `120000`. |
 | `CODEX_MOBILE_DISABLE_PUBLIC_PR_CHECK` | Disable the public-repository open-PR prompt when set to `1`, `true`, `yes`, or `on`. |
-| `CODEX_MOBILE_PUBLIC_PR_REPOSITORY` | GitHub `owner/repo` slug checked for open public pull requests, default `pentiumxp/codex-mobile-web-public`. |
+| `CODEX_MOBILE_PUBLIC_PR_REPOSITORY` | GitHub `owner/repo` slug checked for open public pull requests, default `franksong2702/codex-mobile-web-public`. |
+| `CODEX_MOBILE_PUBLIC_RELEASE_REPOSITORY` | GitHub `owner/repo` slug checked for public releases, defaulting to `CODEX_MOBILE_PUBLIC_PR_REPOSITORY`. |
+| `CODEX_MOBILE_PUBLIC_RELEASE_BRANCH` | Branch checked for public releases, default `main`. |
 | `CODEX_MOBILE_PUBLIC_PR_CHECK_TIMEOUT_MS` | Timeout for the unauthenticated GitHub public PR check, default `12000`. |
 | `CODEX_MOBILE_PUBLIC_PR_CHECK_CACHE_MS` | In-memory cache window for public PR status checks, default `900000` (`15 minutes`). |
 | `CODEX_MOBILE_KEY` | Inline web access key. |

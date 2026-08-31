@@ -50,6 +50,11 @@ test("server runtime config resolves default runtime paths and bounded ids", () 
   assert.equal(config.STATE_DB, "/home/tester/.codex/state_5.sqlite");
   assert.equal(config.MUX_ENDPOINT_FILE, "/home/tester/.codex/mux/endpoint.json");
   assert.equal(config.APP_VERSION, "9.8.7");
+  assert.equal(config.APP_UPDATE_REMOTE, "origin");
+  assert.equal(config.APP_UPDATE_BRANCH, "main");
+  assert.equal(config.PUBLIC_PR_REPOSITORY, "franksong2702/codex-mobile-web-public");
+  assert.equal(config.PUBLIC_RELEASE_REPOSITORY, "franksong2702/codex-mobile-web-public");
+  assert.equal(config.PUBLIC_RELEASE_BRANCH, "main");
   assert.equal(config.THREAD_SIDE_CHAT_SCOPE_ID, "profile-main");
   assert.equal(config.WORKSPACE_DELEGATION_TOOL_FULL_NAME, "mcp__codex_mobile.delegate_to_thread");
   assert.equal(config.TASK_CARD_RETURN_TOOL_FULL_NAME, "mcp__codex_mobile.return_to_source");

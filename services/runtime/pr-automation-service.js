@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 
 const DEFAULT_PRIVATE_REPOSITORY = "pentiumxp/codex-mobile-web";
-const DEFAULT_PUBLIC_REPOSITORY = "pentiumxp/codex-mobile-web-public";
+const DEFAULT_PUBLIC_REPOSITORY = "franksong2702/codex-mobile-web-public";
 const DEFAULT_PLUGIN_ID = "codex-mobile-web";
 const DEFAULT_WORKSPACE_CWD = "/Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web";
 

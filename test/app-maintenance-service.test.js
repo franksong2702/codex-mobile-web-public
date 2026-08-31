@@ -181,6 +181,30 @@ test("GitHub preview status uses bounded normalization and an in-flight/cache ow
   assert.deepEqual(second, first);
 });
 
+test("public pull request checks default to the canonical product fork", async () => {
+  let requestedUrl = "";
+  const service = createAppMaintenanceService({
+    now: () => Date.parse("2026-08-31T00:00:00Z"),
+    fetch: async (url) => {
+      requestedUrl = url;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [],
+      };
+    },
+  });
+
+  const status = await service.refreshPublicPullRequestStatus({ force: true });
+
+  assert.equal(
+    requestedUrl,
+    "https://api.github.com/repos/franksong2702/codex-mobile-web-public/pulls?state=open&per_page=5",
+  );
+  assert.equal(status.repository, "franksong2702/codex-mobile-web-public");
+  assert.equal(status.hasOpenPullRequests, false);
+});
+
 test("public release status compares public GitHub ref with the local checkout", async () => {
   let fetchCount = 0;
   const service = createAppMaintenanceService({

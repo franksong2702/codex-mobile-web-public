@@ -62,9 +62,14 @@ Environment variables:
 
 - `CODEX_MOBILE_PRIVATE_REPOSITORY`, default `pentiumxp/codex-mobile-web`.
 - `CODEX_MOBILE_PUBLIC_REPOSITORY`, default
-  `pentiumxp/codex-mobile-web-public`.
+  `franksong2702/codex-mobile-web-public`.
 - `CODEX_MOBILE_PR_AUTOMATION_STATE`, default
   `.agent-context/pr-automation-state.json`.
+
+The private repository default belongs to the legacy Home AI private/public
+absorption workflow. Standalone product-fork automation must either configure
+`CODEX_MOBILE_PRIVATE_REPOSITORY` explicitly or leave that scheduled workflow
+disabled. It does not define the canonical source repository.
 
 For tests or dry-run automation, pass `--fixture <file>`; fixture mode never
 requires GitHub credentials and still produces the same sanitized plan shape.

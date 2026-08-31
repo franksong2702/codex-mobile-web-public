@@ -12,6 +12,7 @@ const {
 } = require("../adapters/public-pull-request-service");
 
 test("normalizes owner/repo public repository slugs", () => {
+  assert.equal(normalizeRepositorySlug(""), "franksong2702/codex-mobile-web-public");
   assert.equal(normalizeRepositorySlug(" pentiumxp/codex-mobile-web-public "), "pentiumxp/codex-mobile-web-public");
   assert.equal(normalizeRepositorySlug("", "owner/repo"), "owner/repo");
   assert.throws(() => normalizeRepositorySlug("not-a-slug"), /owner\/repo/);

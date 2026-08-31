@@ -480,7 +480,7 @@ function createAppUpdateRuntime(deps = {}) {
   
   function publicPrMergeInstruction(status) {
     const summary = publicPrSummaryText(status);
-    const repository = status && status.repository || state.publicPrRepository || "pentiumxp/codex-mobile-web-public";
+    const repository = status && status.repository || state.publicPrRepository || "franksong2702/codex-mobile-web-public";
     return [
       `请检查 public 仓库 ${repository} 的开放 PR${summary ? `：${summary}` : ""}。`,
       "按当前项目规则先评估 PR 是否可合并；如要合并，更新 public README 的中文发布说明，运行验证和隐私扫描，再提交并推送 public。",

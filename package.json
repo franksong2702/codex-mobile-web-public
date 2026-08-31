@@ -4,6 +4,11 @@
   "description": "A local authenticated mobile web client for Codex app-server.",
   "type": "commonjs",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/franksong2702/codex-mobile-web-public.git"
+  },
+  "homepage": "https://github.com/franksong2702/codex-mobile-web-public",
   "engines": {
     "node": ">=22"
   },

@@ -4,6 +4,11 @@
 
 Codex Mobile Web is a local authenticated web shell around Codex app-server. It does not replace Codex Desktop; it reads the same local Codex state and, when configured for shared mode, attaches to the same live app-server stream through the mux.
 
+The canonical product repository is `franksong2702/codex-mobile-web-public`.
+`pentiumxp/codex-mobile-web-public` is an optional read-only upstream reference,
+not an automatic update or merge source. Repository and release ownership rules
+live in `docs/FORK_GOVERNANCE.md`.
+
 ```text
 Phone / browser / PWA
         |

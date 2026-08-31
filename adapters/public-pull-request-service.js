@@ -1,6 +1,6 @@
 "use strict";
 
-function normalizeRepositorySlug(value, fallback = "pentiumxp/codex-mobile-web-public") {
+function normalizeRepositorySlug(value, fallback = "franksong2702/codex-mobile-web-public") {
   const text = String(value || "").trim() || fallback;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text)) {
     throw new Error("Public PR repository must be in owner/repo form");

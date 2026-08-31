@@ -33,6 +33,7 @@ const public90 = {
 test("PR automation adapter re-exports the canonical service boundary", () => {
   assert.equal(adapter.planPrAutomationRun, service.planPrAutomationRun);
   assert.equal(adapter.PR_AUTOMATION_STATES, service.PR_AUTOMATION_STATES);
+  assert.equal(service.DEFAULT_PUBLIC_REPOSITORY, "franksong2702/codex-mobile-web-public");
 });
 
 test("latest public PR can remain held after private absorption without premature close", () => {

@@ -111,6 +111,7 @@ const { createViteShellArtifactService } = require("./services/runtime/vite-shel
 const { createServerRuntimeConfigService } = require("./services/runtime/server-runtime-config-service");
 const { createServerHttpRuntimeService } = require("./services/runtime/server-http-runtime-service");
 const { createServerRestartDrainService } = require("./services/runtime/server-restart-drain-service");
+const { createVoxSparkSurfaceHostService } = require("./services/runtime/voxspark-surface-host-service");
 const { createRuntimeSettingsService } = require("./services/runtime/runtime-settings-service");
 const { createThreadRuntimeSettingsService } = require("./services/runtime/thread-runtime-settings-service");
 const { createModelOptionsRuntimeService } = require("./services/runtime/model-options-runtime-service");
@@ -234,6 +235,7 @@ const {
   CHATGPT_PRO_OUTPUT_DIR,
   CHATGPT_PRO_BRIDGE_ENABLED,
   CHATGPT_PRO_PLANNER_DIR,
+  VOXSPARK_BRIDGE_URL,
   CHATGPT_PRO_MCP_TOKEN,
   CHATGPT_PRO_MCP_TOKEN_FILE,
   CHATGPT_PRO_MCP_ALLOW_DIRECT_TASK_CARDS,
@@ -1894,6 +1896,10 @@ const chatGptProRuntimeService = createChatGptProRuntimeService({
   truncateSingleLine,
   createThreadTaskCardsFromSourceThread,
 });
+const voxsparkSurfaceHostService = createVoxSparkSurfaceHostService({
+  defaultBridgeUrl: VOXSPARK_BRIDGE_URL,
+  logger: console,
+});
 const {
   chatGptProBridgeService,
   chatGptProMcpService,
@@ -2158,7 +2164,9 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   tryUpdateThreadTitle,
   upsertThreadListFallbackCacheThreads,
   userBehaviorRepairCardService,
+  visibleWorkspaceRoots,
   visibilityFromGlobalState,
+  voxsparkSurfaceHostService,
   viteShellArtifactService,
   webPushRuntimeService: notificationRuntimeService.webPushRuntimeService,
   workspaceDelegationPublicSettings,
@@ -2194,6 +2202,9 @@ function shutdown(reason = "signal") {
   } catch (_) {}
   try {
     remoteManagedWorkspaceRunnerService.stop();
+  } catch (_) {}
+  try {
+    voxsparkSurfaceHostService.stop();
   } catch (_) {}
   try {
     clearTaskCardExecutionWatchdog();

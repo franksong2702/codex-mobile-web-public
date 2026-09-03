@@ -64,6 +64,7 @@ function createComposerRuntime(deps = {}) {
     newThreadSelectedPermissionMode,
     normalizeOptionList,
     normalizeThreadGoal,
+    onComposerSubmitted = () => {},
     openThreadGoalDialog,
     postClientEvent,
     publishPluginVoiceInputCapability,
@@ -150,6 +151,17 @@ function finishSendProgressWatchdog() {
   clearSendProgressWatchdog();
   state.sendProgressStartAt = 0;
   state.sendProgressWarned = false;
+}
+
+function notifyComposerSubmitted(details) {
+  try {
+    onComposerSubmitted(details);
+  } catch (err) {
+    postClientEvent("voxspark_submit_sync_failed", {
+      threadId: String(details && details.threadId || ""),
+      error: String(err && err.message || "surface_callback_failed").slice(0, 160),
+    });
+  }
 }
 
 function normalizeClientErrorMessage(message, err = null) {
@@ -1981,6 +1993,11 @@ async function sendMessage(event) {
         });
       }
     }
+    notifyComposerSubmitted({
+      threadId: targetThreadId,
+      clientSubmissionId,
+      steering,
+    });
     commitPluginVoiceInputSessionsAfterSend(submittedDraftKey, text, {
       threadId: targetThreadId,
       messageId: clientSubmissionId,

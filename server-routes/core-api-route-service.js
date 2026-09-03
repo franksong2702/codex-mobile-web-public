@@ -100,6 +100,7 @@ function createCoreApiRouteService(deps = {}) {
     threadListFallbackPrewarmPublicStatus,
     timingSafeEquals,
     userBehaviorRepairCardService,
+    voxsparkSurfaceHostService,
     viteShellArtifactService,
     workspaceDelegationPublicSettings,
     workspaceRegistryService,
@@ -280,6 +281,10 @@ function createCoreApiRouteService(deps = {}) {
           ? remoteManagedWorkspaceSettingsService.publicSettings()
           : { enabled: false, workspaceKind: "remote_managed_workspace", connectionStatus: "disconnected" },
         frontendDiagnosticLog: frontendDiagnosticLogPublicSettings(),
+        voxspark: voxsparkSurfaceHostService
+          && typeof voxsparkSurfaceHostService.publicConfig === "function"
+          ? voxsparkSurfaceHostService.publicConfig()
+          : { enabled: false, bridgeUrl: "" },
         hermesPlugin: {
           id: "codex-mobile",
           manifestPath: "/api/v1/hermes/plugin/manifest",

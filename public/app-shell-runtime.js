@@ -879,6 +879,14 @@ async function start() {
     return;
   }
   applyFrontendDiagnosticLogPublicConfig(config);
+  if (
+    config.voxspark
+    && config.voxspark.enabled
+    && window.voxsparkSurfaceHostRuntime
+    && !window.voxsparkSurfaceHostRuntime.readState().enabled
+  ) {
+    window.voxsparkSurfaceHostRuntime.configureBridgeUrl(config.voxspark.bridgeUrl);
+  }
   initializePageBuildState(config);
   startPageRefreshChecks();
   state.appVersion = String(config.version || "");

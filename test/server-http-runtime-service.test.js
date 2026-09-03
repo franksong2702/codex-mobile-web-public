@@ -146,7 +146,7 @@ test("server http runtime rate-limits repeated diagnostic log events", () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("server http runtime does not rate-limit frontend diagnostic log samples", () => {
+test("server http runtime does not rate-limit action-level client diagnostics", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-http-runtime-"));
   const logPath = path.join(dir, "mobile-web.log");
   const service = createServerHttpRuntimeService({
@@ -160,12 +160,17 @@ test("server http runtime does not rate-limit frontend diagnostic log samples", 
   service.logClientEvent("frontend_diagnostic_log", { details: { seq: 1, stage: "local-insert" } });
   service.logClientEvent("frontend_diagnostic_log", { details: { seq: 2, stage: "post-response" } });
   service.logClientEvent("frontend_diagnostic_log", { details: { seq: 3, stage: "dom-probe" } });
+  service.logClientEvent("voxspark_surface_host", { details: { code: "composer_replace_confirmed", commandSequence: 1 } });
+  service.logClientEvent("voxspark_surface_host", { details: { code: "host_action_confirmed", commandSequence: 2 } });
 
   const text = fs.readFileSync(logPath, "utf8");
   assert.equal((text.match(/^\[client-event\] frontend_diagnostic_log /gm) || []).length, 3);
   assert.match(text, /"seq":1/);
   assert.match(text, /"seq":2/);
   assert.match(text, /"seq":3/);
+  assert.equal((text.match(/^\[client-event\] voxspark_surface_host /gm) || []).length, 2);
+  assert.match(text, /"code":"composer_replace_confirmed","commandSequence":1/);
+  assert.match(text, /"code":"host_action_confirmed","commandSequence":2/);
   assert.doesNotMatch(text, /"suppressedCount"/);
   fs.rmSync(dir, { recursive: true, force: true });
 });

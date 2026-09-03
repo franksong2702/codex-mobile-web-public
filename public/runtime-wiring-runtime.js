@@ -1,5 +1,7 @@
 "use strict";
 
+let voxsparkSurfaceHostRuntime = null;
+
 const root = typeof globalThis !== "undefined" ? globalThis : window;
 
 function initializeThreadDetailRuntimeWiring() {
@@ -126,6 +128,10 @@ function initializeComposerRuntimeWiring() {
     newThreadSelectedPermissionMode,
     normalizeOptionList,
     normalizeThreadGoal,
+    onComposerSubmitted: (submission) => (
+      voxsparkSurfaceHostRuntime
+      && voxsparkSurfaceHostRuntime.handleComposerSubmission(submission)
+    ),
     openThreadGoalDialog,
     postClientEvent,
     publishPluginVoiceInputCapability,
@@ -168,6 +174,53 @@ function initializeComposerRuntimeWiring() {
     writeCurrentDraftToKey,
   });
   return composerRuntime;
+}
+
+function initializeVoxSparkSurfaceHostRuntimeWiring() {
+  if (voxsparkSurfaceHostRuntime) return voxsparkSurfaceHostRuntime;
+  const surfaceHostApi = window.CodexVoxSparkSurfaceHostRuntime;
+  if (!surfaceHostApi || typeof surfaceHostApi.createVoxSparkSurfaceHostRuntime !== "function") return null;
+  const composer = initializeComposerRuntimeWiring();
+  voxsparkSurfaceHostRuntime = surfaceHostApi.createVoxSparkSurfaceHostRuntime({
+    document,
+    window,
+    location: window.location,
+    localStorage,
+    relay: (payload) => api("/api/voxspark/surface/context", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 4000,
+    }),
+    $,
+    currentComposerThreadId,
+    composerTargetThread,
+    composerTargetActiveTurnId,
+    composerText: composer.composerText,
+    setComposerText: composer.setComposerText,
+    sendMessage: composer.sendMessage,
+    interruptActiveTurn: composer.interruptActiveTurn,
+    scheduleCurrentDraftSave,
+    threadTitle: (thread) => threadDisplayName(thread),
+    threadWorkspace: (thread) => basenameForFsPath(thread && thread.cwd || ""),
+    approvalPending: (threadId, turnId) => Boolean(
+      threadId
+      && turnId
+      && approvalsForTurn(threadId, turnId).some((request) => isApprovalActive(request))
+    ),
+    report: (code, detail) => postClientEvent("voxspark_surface_host", {
+      code: String(code || "unknown").slice(0, 80),
+      action: String(detail && detail.action || "").slice(0, 24),
+      outcome: String(detail && detail.outcome || "").slice(0, 24),
+      captureId: String(detail && detail.captureId || "").slice(0, 96),
+      actionId: String(detail && detail.actionId || "").slice(0, 96),
+      commandSequence: Number.isInteger(detail && detail.commandSequence)
+        ? detail.commandSequence
+        : 0,
+    }),
+  });
+  voxsparkSurfaceHostRuntime.start();
+  window.voxsparkSurfaceHostRuntime = voxsparkSurfaceHostRuntime;
+  return voxsparkSurfaceHostRuntime;
 }
 
 function initializeThreadListRuntimeWiring() {
@@ -346,6 +399,7 @@ function initializeThreadTileRuntimeWiring() {
 function initializeCodexMobileRuntimeWiring() {
   initializeThreadDetailRuntimeWiring();
   initializeComposerRuntimeWiring();
+  initializeVoxSparkSurfaceHostRuntimeWiring();
   initializeThreadListRuntimeWiring();
   initializeThreadTileRuntimeWiring();
 }

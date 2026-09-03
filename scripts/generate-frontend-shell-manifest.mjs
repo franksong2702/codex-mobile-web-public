@@ -94,6 +94,7 @@ const SHELL_ENTRY_GROUP_DEFINITIONS = [
       "/conversation-render-runtime.js",
       "/event-stream-runtime.js",
       "/composer-bridge-runtime.js",
+      "/voxspark-surface-host-runtime.js",
     ],
   },
   {

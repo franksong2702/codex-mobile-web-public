@@ -95,6 +95,7 @@ function createServerRouteCompositionService(dependencies = {}) {
     threadListFallbackPrewarmPublicStatus: dependencies.threadListFallbackPrewarmPublicStatus,
     timingSafeEquals: dependencies.timingSafeEquals,
     userBehaviorRepairCardService: dependencies.userBehaviorRepairCardService,
+    voxsparkSurfaceHostService: dependencies.voxsparkSurfaceHostService,
     viteShellArtifactService: dependencies.viteShellArtifactService,
     workspaceDelegationPublicSettings: dependencies.workspaceDelegationPublicSettings,
     workspaceRegistryService: dependencies.workspaceRegistryService,
@@ -184,6 +185,7 @@ function createServerRouteCompositionService(dependencies = {}) {
     tryUpdateThreadTitle: dependencies.tryUpdateThreadTitle,
     upsertThreadListFallbackCacheThreads: dependencies.upsertThreadListFallbackCacheThreads,
     visibilityFromGlobalState: dependencies.visibilityFromGlobalState,
+    voxsparkSurfaceHostService: dependencies.voxsparkSurfaceHostService,
     webPushRuntimeService: dependencies.webPushRuntimeService,
     workspaceRegistryService: dependencies.workspaceRegistryService,
   });

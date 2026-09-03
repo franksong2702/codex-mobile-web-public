@@ -29,7 +29,7 @@ normal active-turn refreshes from racing the 500 ms browser relay poll and
 silently dropping a newly queued Send, Steer, or Queue command.
 
 Composer replacement and Host action commands retain the originating bounded
-`capture_id`. Actions additionally carry a deterministic `action_id`, while the
+`capture_id`. Actions additionally carry a Bridge-issued unique `action_id`, while the
 backend's monotonically increasing command sequence remains the delivery-order
 coordinate. Backend and browser diagnostics log only these ids, action type,
 outcome, and sequence; they never log transcript text or Composer contents.
@@ -39,6 +39,15 @@ includes a bounded `service_epoch`; the browser returns both that epoch and its
 `after_sequence` watermark. The backend acknowledges or filters commands only
 when the epoch matches. After a backend restart, the browser adopts the new
 epoch and resets its sequence watermark before receiving new commands.
+
+Action execution has a separate result handshake. After one `host.action`
+attempt, the browser reports only `action_id`, success/failure, retryability,
+and a bounded error code. It advances the command sequence and never
+automatically repeats an ambiguous Codex action. The persistent Host service
+forwards `host.action.result`, retains and replays it across Bridge reconnects,
+and removes it only after `bridge.action.ack`. A bounded receipt list makes a
+duplicate browser upload idempotent when the previous HTTP response was lost.
+Transcript text, Composer contents, and Session bodies are excluded.
 
 ## Activation
 
@@ -104,6 +113,9 @@ wins the backend arbitration.
 - Backend unit tests cover loopback-only URL validation, persistent Host socket
   ownership, context-revision translation, command delivery, lease expiry and
   recovery, plus the authenticated route boundary.
+- Action-result tests cover browser success/failure reporting, no automatic
+  retry, persistent replay, Bridge acknowledgement, and duplicate upload
+  receipts. These are source-level tests and have not been deployed to M15.
 - Browser unit tests cover the relay transport and existing final-only draft,
   Send, Queue, Steer, Stop, blur, visibility, and Session-switch behavior.
 - Correlation tests cover Composer confirmation, action confirmation/retry, and

@@ -220,6 +220,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   let relayInFlight = false;
   let relayServiceEpoch = "";
   let lastCommandSequence = 0;
+  let pendingCommandResults = [];
   let contextRevision = 0;
   let contextFingerprint = "";
   let currentContext = null;
@@ -369,6 +370,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         surface_revision: currentContext.revision,
         service_epoch: relayServiceEpoch,
         after_sequence: lastCommandSequence,
+        command_results: pendingCommandResults.map((item) => Object.assign({}, item)),
         context: publicContext(),
       });
       relayConnected = Boolean(result && result.connected);
@@ -377,7 +379,14 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         const serviceRestarted = Boolean(relayServiceEpoch);
         relayServiceEpoch = nextServiceEpoch;
         lastCommandSequence = 0;
+        pendingCommandResults = [];
         if (serviceRestarted) diagnostic("surface_host_service_restarted");
+      }
+      const acceptedResultIds = new Set(Array.isArray(result && result.accepted_result_ids)
+        ? result.accepted_result_ids.map(traceId).filter(Boolean)
+        : []);
+      if (acceptedResultIds.size) {
+        pendingCommandResults = pendingCommandResults.filter((item) => !acceptedResultIds.has(item.action_id));
       }
       const commands = Array.isArray(result && result.commands) ? result.commands : [];
       for (const command of commands) {
@@ -597,14 +606,36 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
           outcome,
           ...traceDetails(message, metadata.sequence),
         });
+        const actionId = traceId(message.action_id);
+        if (actionId) {
+          pendingCommandResults = pendingCommandResults.filter((item) => item.action_id !== actionId);
+          pendingCommandResults.push({
+            action_id: actionId,
+            outcome: outcome === COMMAND_ACCEPTED ? "succeeded" : "failed",
+            retryable: outcome === COMMAND_RETRY,
+            error_code: outcome === COMMAND_ACCEPTED ? "" : outcome === COMMAND_RETRY
+              ? "action_failed" : "action_rejected",
+          });
+        }
         syncContext({ force: true });
-        return outcome;
+        return actionId ? COMMAND_ACCEPTED : outcome;
       } catch (_) {
         diagnostic("host_action_failed", {
           action: text(message.action),
           outcome: COMMAND_RETRY,
           ...traceDetails(message, metadata.sequence),
         });
+        const actionId = traceId(message.action_id);
+        if (actionId) {
+          pendingCommandResults = pendingCommandResults.filter((item) => item.action_id !== actionId);
+          pendingCommandResults.push({
+            action_id: actionId,
+            outcome: "failed",
+            retryable: true,
+            error_code: "action_failed",
+          });
+          return COMMAND_ACCEPTED;
+        }
         return COMMAND_RETRY;
       }
     }
@@ -675,6 +706,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       lastReleasedDraftRevision,
       queuedDrafts: queuedDrafts.map((draft) => Object.assign({}, draft)),
       queueTurnGate,
+      pendingCommandResults: pendingCommandResults.map((item) => Object.assign({}, item)),
     };
   }
 

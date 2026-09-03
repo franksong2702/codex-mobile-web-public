@@ -6787,3 +6787,11 @@ The previous full handoff was archived and should be opened only when old proven
 - Privacy: metadata only. No raw secrets, access keys, cookies, launch tokens,
   endpoint bodies, private thread/message bodies, screenshots, raw cache JSON,
   provider payloads, database rows, or long logs stored.
+# 2026-09-04 - VoxSpark Action Result Relay Candidate
+
+- Browser Surface Host now reports one content-free success/failure result for
+  each action id instead of retrying an ambiguous Send automatically.
+- Persistent Host service retains and replays action results until Bridge ack;
+  duplicate browser result uploads use a bounded idempotent receipt list.
+- Classic and native runtime sources were updated together. This is not
+  deployed: listener 8789, Bridge 8790, ChatGPT, and BOX were not restarted.

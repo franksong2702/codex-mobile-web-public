@@ -251,6 +251,61 @@ test("same browser revision refresh preserves and rebinds a pending Steer comman
   service.stop();
 });
 
+test("Host action results are replayed until Bridge acknowledges them", () => {
+  FakeWebSocket.instances = [];
+  const service = createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    serviceEpoch: "service-results",
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const first = publish(service);
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  socket.message({
+    type: "host.action",
+    action: "submit",
+    context_revision: 1,
+    draft_revision: 4,
+    action_id: "a:test:4",
+  });
+  const delivered = publish(service);
+  assert.equal(delivered.commands[0].message.action_id, "a:test:4");
+
+  const accepted = publish(service, {
+    service_epoch: first.service_epoch,
+    after_sequence: delivered.commands[0].sequence,
+    command_results: [{
+      action_id: "a:test:4",
+      outcome: "succeeded",
+      retryable: false,
+      error_code: "",
+    }],
+  });
+  assert.deepEqual(accepted.accepted_result_ids, ["a:test:4"]);
+  assert.equal(service.status().pending_results, 1);
+  assert.equal(socket.sent.at(-1).type, "host.action.result");
+
+  socket.message({ type: "bridge.ready" });
+  assert.equal(socket.sent.at(-1).type, "host.action.result");
+  socket.message({ type: "bridge.action.ack", action_id: "a:test:4" });
+  assert.equal(service.status().pending_results, 0);
+  const duplicate = publish(service, {
+    service_epoch: first.service_epoch,
+    after_sequence: delivered.commands[0].sequence,
+    command_results: [{
+      action_id: "a:test:4",
+      outcome: "succeeded",
+      retryable: false,
+      error_code: "",
+    }],
+  });
+  assert.deepEqual(duplicate.accepted_result_ids, ["a:test:4"]);
+  assert.equal(service.status().pending_results, 0);
+  service.stop();
+});
+
 test("a Host socket stuck connecting is abandoned and retried", () => {
   FakeWebSocket.instances = [];
   const timers = [];

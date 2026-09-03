@@ -541,7 +541,7 @@ test("failed send keeps the owned draft and queued entry available", async () =>
   assert.equal(fixture.composer, "Keep this draft after failure.");
 });
 
-test("failed hardware Send is retried before it is acknowledged to the backend relay", async () => {
+test("failed hardware Send reports failure without automatically sending twice", async () => {
   const relayRequests = [];
   const fixture = createFixture({
     sendSucceeds: (attempt) => attempt > 1,
@@ -550,6 +550,7 @@ test("failed hardware Send is retried before it is acknowledged to the backend r
       return {
         ok: true,
         connected: true,
+        accepted_result_ids: payload.command_results.map((item) => item.action_id),
         commands: payload.after_sequence === 0 ? [
           {
             sequence: 1,
@@ -570,17 +571,6 @@ test("failed hardware Send is retried before it is acknowledged to the backend r
               action_id: "capture-31:31:submit",
             }),
           },
-        ] : payload.after_sequence === 1 ? [
-          {
-            sequence: 2,
-            message: message("host.action", {
-              action: "submit",
-              context_revision: 1,
-              draft_revision: 31,
-              capture_id: "capture-31",
-              action_id: "capture-31:31:submit",
-            }),
-          },
         ] : [],
       };
     },
@@ -591,9 +581,9 @@ test("failed hardware Send is retried before it is acknowledged to the backend r
   fixture.runtime.syncContext();
   await nextTurn();
 
-  assert.equal(relayRequests.at(-1).after_sequence, 1);
-  assert.equal(fixture.sends.length, 2);
-  assert.equal(fixture.composer, "");
+  assert.equal(relayRequests.at(-1).after_sequence, 2);
+  assert.equal(fixture.sends.length, 1);
+  assert.equal(fixture.composer, "Keep this draft until Send succeeds.");
   assert.ok(fixture.diagnostics.some((item) => (
     item.code === "host_action_retry"
     && item.detail.commandSequence === 2
@@ -602,6 +592,14 @@ test("failed hardware Send is retried before it is acknowledged to the backend r
   fixture.runtime.syncContext();
   await nextTurn();
   assert.equal(relayRequests.at(-1).after_sequence, 2);
+  const resultRequest = relayRequests.find((request) => request.command_results.length > 0);
+  assert.deepEqual(resultRequest.command_results, [{
+    action_id: "capture-31:31:submit",
+    outcome: "failed",
+    retryable: true,
+    error_code: "action_failed",
+  }]);
+  assert.deepEqual(fixture.runtime.readState().pendingCommandResults, []);
 });
 
 test("selected Composer target stays armed across blur and conversation navigation", async () => {

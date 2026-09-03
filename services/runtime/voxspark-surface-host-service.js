@@ -24,6 +24,20 @@ function commandTrace(message) {
   };
 }
 
+function normalizeCommandResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const actionId = traceId(value.action_id);
+  const outcome = value.outcome === "succeeded" || value.outcome === "failed" ? value.outcome : "";
+  const errorCode = value.error_code == null ? "" : traceId(value.error_code);
+  if (!actionId || !outcome || (boundedText(value.error_code, 96) && !errorCode)) return null;
+  return {
+    action_id: actionId,
+    outcome,
+    retryable: value.retryable === true,
+    error_code: errorCode,
+  };
+}
+
 function safeLoopbackBridgeUrl(value) {
   try {
     const parsed = new URL(String(value || "").trim());
@@ -93,6 +107,8 @@ function createVoxSparkSurfaceHostService(options = {}) {
   let commandSequence = 0;
   let target = null;
   let pendingCommands = [];
+  let pendingResults = [];
+  let acceptedResultReceipts = [];
 
   function logCommand(event, details = {}) {
     if (!logger || typeof logger.info !== "function") return;
@@ -116,6 +132,10 @@ function createVoxSparkSurfaceHostService(options = {}) {
       context_revision: target.contextRevision,
       ...target.context,
     });
+  }
+
+  function sendPendingResults() {
+    for (const result of pendingResults) send({ type: "host.action.result", ...result });
   }
 
   function clearReconnectTimer() {
@@ -149,6 +169,15 @@ function createVoxSparkSurfaceHostService(options = {}) {
     if (!message || message.contract !== CONTRACT) return;
     if (message.type === "bridge.ready") {
       sendTargetContext();
+      sendPendingResults();
+      return;
+    }
+    if (message.type === "bridge.action.ack") {
+      const actionId = traceId(message.action_id);
+      if (!actionId) return;
+      const before = pendingResults.length;
+      pendingResults = pendingResults.filter((item) => item.action_id !== actionId);
+      if (pendingResults.length !== before) logCommand("result_acknowledged", { action_id: actionId });
       return;
     }
     if (message.type !== "host.composer.replace" && message.type !== "host.action") return;
@@ -194,6 +223,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       if (socket !== nextSocket) return;
       clearConnectTimer();
       sendTargetContext();
+      sendPendingResults();
     });
     nextSocket.addEventListener("message", handleBridgeMessage);
     nextSocket.addEventListener("close", () => {
@@ -266,6 +296,38 @@ function createVoxSparkSurfaceHostService(options = {}) {
       : 0;
     const acknowledgementMatchesService = traceId(input.service_epoch) === serviceEpoch;
     const effectiveAfterSequence = acknowledgementMatchesService ? afterSequence : 0;
+    const acceptedResultIds = [];
+    if (acknowledgementMatchesService && Array.isArray(input.command_results)) {
+      for (const rawResult of input.command_results.slice(0, MAX_PENDING_COMMANDS)) {
+        const result = normalizeCommandResult(rawResult);
+        if (!result) continue;
+        if (acceptedResultReceipts.includes(result.action_id)) {
+          acceptedResultIds.push(result.action_id);
+          continue;
+        }
+        const command = pendingCommands.find((item) => (
+          item.clientId === clientId && item.message.type === "host.action" &&
+          item.message.action_id === result.action_id
+        ));
+        if (!command) continue;
+        if (!pendingResults.some((item) => item.action_id === result.action_id)) {
+          pendingResults.push(result);
+          if (pendingResults.length > MAX_PENDING_COMMANDS) pendingResults.shift();
+          send({ type: "host.action.result", ...result });
+          logCommand("result_queued", {
+            action_id: result.action_id,
+            outcome: result.outcome,
+            retryable: result.retryable,
+            error_code: result.error_code || null,
+          });
+        }
+        acceptedResultReceipts.push(result.action_id);
+        if (acceptedResultReceipts.length > MAX_PENDING_COMMANDS * 4) {
+          acceptedResultReceipts = acceptedResultReceipts.slice(-(MAX_PENDING_COMMANDS * 4));
+        }
+        acceptedResultIds.push(result.action_id);
+      }
+    }
     const pendingBeforeExpiry = pendingCommands.length;
     pendingCommands = pendingCommands.filter((item) => item.expiresAt > now());
     if (pendingCommands.length !== pendingBeforeExpiry) {
@@ -302,6 +364,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
         context_revision: target.contextRevision,
         lease_ms: leaseMs,
         commands: [],
+        accepted_result_ids: acceptedResultIds,
       };
     }
     const fingerprint = JSON.stringify(context);
@@ -388,6 +451,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       context_revision: target.contextRevision,
       lease_ms: leaseMs,
       commands,
+      accepted_result_ids: acceptedResultIds,
     };
   }
 
@@ -398,6 +462,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       target_active: Boolean(target && target.expiresAt > now() && target.context.composer.focused),
       context_revision: target ? target.contextRevision : 0,
       pending_commands: pendingCommands.length,
+      pending_results: pendingResults.length,
     };
   }
 
@@ -418,6 +483,8 @@ function createVoxSparkSurfaceHostService(options = {}) {
     socket = null;
     target = null;
     pendingCommands = [];
+    pendingResults = [];
+    acceptedResultReceipts = [];
     if (logger && typeof logger.info === "function") logger.info("[voxspark] surface host stopped");
   }
 

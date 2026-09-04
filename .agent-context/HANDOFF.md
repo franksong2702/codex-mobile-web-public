@@ -6795,3 +6795,23 @@ The previous full handoff was archived and should be opened only when old proven
   duplicate browser result uploads use a bounded idempotent receipt list.
 - Classic and native runtime sources were updated together. This is not
   deployed: listener 8789, Bridge 8790, ChatGPT, and BOX were not restarted.
+
+## 2026-09-04 - VoxSpark Action Result Relay Deployment Readback
+
+- The approved candidate was transplanted to the existing dirty M15 production
+  checkout without resetting or replacing unrelated work.
+- Focused live-checkout tests passed 41/41. Frontend build, manifest checks,
+  static manifest verification, and scoped diff checks passed. Production shell
+  readback is `codex-mobile-shell-v625-d2cd53fd59cc`.
+- Only the 8789 and 8790 LaunchAgents were restarted. Current PIDs are `56753`
+  and `56657`; ChatGPT was not restarted. Bridge health reports Host connected
+  and OTA ready.
+- The standard full browser gate was blocked before browser execution by six
+  unrelated stale app-server processes (`stale_codex_app_server_pressure`,
+  208 MB). Those processes were not terminated in this scoped deployment.
+- Firmware `35346a29` was built, flashed, hash-verified, and reached idle after
+  Wi-Fi and strict HTTPS OTA validation. Physical Send, Queue, Steer, and Stop
+  action-result acceptance remains open.
+- This worktree commit remains local because the configured fork is not a
+  private production backup target. Do not push it before physical acceptance
+  and an explicit repository-visibility decision.

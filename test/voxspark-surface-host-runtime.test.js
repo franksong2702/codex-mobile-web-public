@@ -79,6 +79,7 @@ function createFixture(options = {}) {
   let activeTurnId = options.activeTurnId || "";
   let composer = String(options.composer || "");
   const sends = [];
+  const backgroundSends = [];
   const interrupts = [];
   const diagnostics = [];
   const relayedContexts = [];
@@ -109,6 +110,7 @@ function createFixture(options = {}) {
     setComposerText: (value) => { composer = String(value || ""); },
     sendMessage: async () => {
       sends.push({ threadId, text: composer, activeTurnId });
+      if (typeof options.sendBarrier === "function") await options.sendBarrier();
       const sendSucceeds = typeof options.sendSucceeds === "function"
         ? options.sendSucceeds(sends.length)
         : options.sendSucceeds !== false;
@@ -118,6 +120,10 @@ function createFixture(options = {}) {
         emitDocument("focusout", { target: input, relatedTarget: null });
       }
     },
+    sendDraft: async (draft) => {
+      backgroundSends.push({ ...draft });
+      return true;
+    },
     interruptActiveTurn: async (...args) => { interrupts.push(args); },
     threadWorkspace: () => "VoxSpark",
     report: (code, detail) => diagnostics.push({ code, detail }),
@@ -126,6 +132,7 @@ function createFixture(options = {}) {
     clearInterval() {},
     setTimeout: () => 1,
     clearTimeout() {},
+    polishContextConsent: options.polishContextConsent,
   });
   assert.equal(runtime.start(), true);
   const socket = {
@@ -136,6 +143,7 @@ function createFixture(options = {}) {
     runtime,
     socket,
     sends,
+    backgroundSends,
     interrupts,
     diagnostics,
     relayRequests,
@@ -209,6 +217,11 @@ test("VoxSpark Host Adapter is present in classic and native ESM shells", async 
   const native = await import(nativeUrl);
   assert.equal(typeof native.createVoxSparkSurfaceHostRuntime, "function");
   assert.equal(native.CONTRACT, surfaceHost.CONTRACT);
+  assert.equal(native.POLISH_CONTEXT_CONSENT, "bounded-context-v1");
+  assert.deepEqual(
+    native.correctionCandidate("切回三省A", "切回Session A"),
+    surfaceHost.correctionCandidate("切回三省A", "切回Session A"),
+  );
   assert.equal(native.appendComposerText("Existing.", "Voice."), "Existing. Voice.");
   assert.equal(native.appendComposerText("Existing. ", "Voice."), "Existing. Voice.");
   assert.equal(native.appendComposerText("", "Voice."), surfaceHost.appendComposerText("", "Voice."));
@@ -248,6 +261,7 @@ test("public config activates the deployment default after the Host runtime is w
       source,
       /config\.voxspark[\s\S]*config\.voxspark\.enabled[\s\S]*!window\.voxsparkSurfaceHostRuntime\.readState\(\)\.enabled[\s\S]*voxsparkSurfaceHostRuntime\.configureBridgeUrl\(config\.voxspark\.bridgeUrl\)/,
     );
+    assert.match(source, /configurePolishContextConsent\(config\.voxspark\.polishContextConsent\)/);
   }
 });
 
@@ -317,26 +331,40 @@ test("voice drafts append after existing Composer text without overwriting it", 
   );
 });
 
-test("hardware Send never restores an older voice draft over later Composer edits", async () => {
+test("hardware Send submits the current Composer after later manual edits", async () => {
   const fixture = createFixture({ composer: "Existing text." });
   const revision = fixture.runtime.readState().contextRevision;
-  fixture.socket.message(message("host.composer.replace", {
+  await fixture.runtime.handleMessage(message("host.composer.replace", {
     context_revision: revision,
     draft_revision: 10,
+    capture_id: "capture-manual-edit",
     text: "Voice text.",
   }));
   fixture.composer = `${fixture.composer} Manual edit.`;
 
-  fixture.socket.message(message("host.action", {
+  const outcome = await fixture.runtime.handleMessage(message("host.action", {
     action: "submit",
     context_revision: revision,
     draft_revision: 10,
-  }));
-  await nextTurn();
+    capture_id: "capture-manual-edit",
+    action_id: "capture-manual-edit:10:submit",
+  }), { sequence: 12 });
 
-  assert.equal(fixture.composer, "Existing text. Voice text. Manual edit.");
-  assert.equal(fixture.sends.length, 0);
-  assert.ok(fixture.diagnostics.some((item) => item.code === "submit_rejected_composer_changed"));
+  assert.equal(outcome, "accepted");
+  assert.deepEqual(fixture.sends, [{
+    threadId: "session-a",
+    text: "Existing text. Voice text. Manual edit.",
+    activeTurnId: "",
+  }]);
+  assert.equal(fixture.composer, "");
+  const state = fixture.runtime.readState();
+  assert.equal(state.activeDraft, null);
+  assert.deepEqual(state.pendingCommandResults, [{
+    action_id: "capture-manual-edit:10:submit",
+    outcome: "succeeded",
+    retryable: false,
+    error_code: "",
+  }]);
 });
 
 test("a successful browser Composer submit releases the matching BOX draft", async () => {
@@ -602,6 +630,62 @@ test("failed hardware Send reports failure without automatically sending twice",
   assert.deepEqual(fixture.runtime.readState().pendingCommandResults, []);
 });
 
+test("slow hardware Send does not block a Session switch context relay", async () => {
+  let releaseSend;
+  const sendBarrier = () => new Promise((resolve) => { releaseSend = resolve; });
+  const relayRequests = [];
+  const fixture = createFixture({
+    sendBarrier,
+    relay: async (payload) => {
+      relayRequests.push(payload);
+      return {
+        ok: true,
+        connected: true,
+        accepted_result_ids: payload.command_results.map((item) => item.action_id),
+        commands: payload.after_sequence === 0 ? [
+          {
+            sequence: 1,
+            message: message("host.composer.replace", {
+              context_revision: 1,
+              draft_revision: 32,
+              capture_id: "capture-32",
+              text: "Send without blocking Session navigation.",
+            }),
+          },
+          {
+            sequence: 2,
+            message: message("host.action", {
+              action: "submit",
+              context_revision: 1,
+              draft_revision: 32,
+              capture_id: "capture-32",
+              action_id: "capture-32:32:submit",
+            }),
+          },
+        ] : [],
+      };
+    },
+  });
+
+  await nextTurn();
+  assert.equal(typeof releaseSend, "function");
+  fixture.switchSessionFromNavigation("session-b");
+  await nextTurn();
+  assert.equal(relayRequests.at(-1).context.session.id, "session-b");
+  assert.equal(relayRequests.at(-1).after_sequence, 1);
+  assert.deepEqual(relayRequests.at(-1).command_results, []);
+  assert.equal(fixture.sends.length, 1);
+
+  releaseSend();
+  await nextTurn();
+  await nextTurn();
+  const resultRequestIndex = relayRequests.findIndex((request) => request.command_results.some((result) => (
+    result.action_id === "capture-32:32:submit" && result.outcome === "succeeded"
+  )));
+  assert.equal(relayRequests[resultRequestIndex].after_sequence, 1);
+  assert.ok(relayRequests.slice(resultRequestIndex + 1).some((request) => request.after_sequence === 2));
+});
+
 test("selected Composer target stays armed across blur and conversation navigation", async () => {
   const fixture = createFixture({ blurAfterSend: true });
   let revision = fixture.runtime.readState().contextRevision;
@@ -715,6 +799,85 @@ test("Host context sends bounded terms from the current Session and Composer", a
   assert.ok(terms.length <= 32);
 });
 
+test("rich polish context is absent by default and bounded when explicitly enabled", async () => {
+  const thread = {
+    id: "session-a",
+    name: "VoxSpark coding",
+    cwd: "/tmp/VoxSpark",
+    turns: [{
+      items: [
+        { type: "userMessage", text: "请切回 Session A。" },
+        { type: "agentMessage", text: "正在检查 VoxSpark。" },
+        { type: "commandExecution", text: "private tool output" },
+      ],
+    }],
+  };
+  const defaultFixture = createFixture({ thread, composer: "已有草稿" });
+  await nextTurn();
+  assert.equal(Object.hasOwn(defaultFixture.relayRequests.at(-1).context, "polish_context"), false);
+
+  const consentedFixture = createFixture({
+    thread,
+    composer: "已有草稿",
+    polishContextConsent: "bounded-context-v1",
+  });
+  await nextTurn();
+  const polish = consentedFixture.relayRequests.at(-1).context.polish_context;
+  assert.equal(polish.consent, "bounded-context-v1");
+  assert.equal(polish.composer_draft, "已有草稿");
+  assert.deepEqual(polish.reference_conversation, [
+    { role: "user", text: "请切回 Session A。" },
+    { role: "assistant", text: "正在检查 VoxSpark。" },
+  ]);
+  assert.equal(JSON.stringify(polish).includes("private tool output"), false);
+  assert.equal(polish.session_profile, "coding-agent");
+  assert.equal(polish.language_policy, "zh-CN-mixed");
+});
+
+test("manual voice-draft edits need two observations and explicit acceptance before reuse", async () => {
+  const fixture = createFixture({ polishContextConsent: "bounded-context-v1" });
+  let revision = fixture.runtime.readState().contextRevision;
+  fixture.socket.message(message("host.composer.replace", {
+    context_revision: revision,
+    draft_revision: 20,
+    text: "我一直是在三省A进行录音",
+  }));
+  fixture.runtime.handleComposerSubmission({
+    threadId: "session-a",
+    text: "我一直是在Session A进行录音",
+  });
+  assert.equal(fixture.runtime.readState().pendingCorrectionSuggestion, null);
+  assert.deepEqual(fixture.runtime.readState().correctionRules, []);
+  fixture.composer = "";
+  fixture.runtime.syncContext();
+
+  revision = fixture.runtime.readState().contextRevision;
+  fixture.socket.message(message("host.composer.replace", {
+    context_revision: revision,
+    draft_revision: 21,
+    text: "切回三省A",
+  }));
+  fixture.runtime.handleComposerSubmission({ threadId: "session-a", text: "切回Session A" });
+  assert.deepEqual(fixture.runtime.readState().pendingCorrectionSuggestion, {
+    heard: "三省A",
+    write: "Session A",
+    occurrences: 2,
+  });
+  assert.deepEqual(fixture.runtime.readState().correctionRules, []);
+  assert.equal(fixture.runtime.acceptCorrection("其他词", "Other"), false);
+  assert.equal(fixture.runtime.acceptCorrection("三省A", "Session A"), true);
+  await nextTurn();
+  assert.deepEqual(fixture.runtime.readState().correctionRules, [
+    { heard: "三省A", write: "Session A" },
+  ]);
+  assert.deepEqual(fixture.relayRequests.at(-1).context.polish_context.correction_rules, [
+    { heard: "三省A", write: "Session A" },
+  ]);
+  assert.ok(fixture.relayRequests.at(-1).context.local_context.terms.some((term) => (
+    term.text === "Session A" && term.boost === 6 && term.source === "composer"
+  )));
+});
+
 test("a passive target mismatch cannot rebind an armed Session", () => {
   const fixture = createFixture();
   fixture.reportPassiveSessionId("session-b");
@@ -786,7 +949,7 @@ test("an active page stays bound after refresh and Session navigation without Co
   assert.equal(state.currentContext.focused, true);
 });
 
-test("Session switch clears unsent and queued VoxSpark drafts", async () => {
+test("Session switch preserves queued VoxSpark drafts without exposing them in the new Session", async () => {
   const fixture = createFixture({ activeTurnId: "turn-a" });
   const revision = fixture.runtime.readState().contextRevision;
   fixture.socket.message(message("host.composer.replace", {
@@ -805,7 +968,68 @@ test("Session switch clears unsent and queued VoxSpark drafts", async () => {
   fixture.switchSessionFromNavigation("session-b");
   const state = fixture.runtime.readState();
   assert.equal(state.currentContext.sessionId, "session-b");
-  assert.equal(state.queuedDrafts.length, 0);
+  assert.equal(state.queuedDrafts.length, 1);
+  assert.equal(state.queuedDrafts[0].sessionId, "session-a");
   assert.equal(state.activeDraft, null);
-  assert.ok(fixture.diagnostics.some((item) => item.code === "session_changed_drafts_cleared"));
+  assert.ok(fixture.diagnostics.some((item) => item.code === "session_changed_drafts_preserved"));
+});
+
+test("a Session switch preserves the original draft and routes its action back to that Session", async () => {
+  const fixture = createFixture({ activeTurnId: "turn-a" });
+  const revision = fixture.runtime.readState().contextRevision;
+  fixture.socket.message(message("host.composer.replace", {
+    context_revision: revision,
+    draft_revision: 13,
+    capture_id: "capture-session-action-race",
+    text: "Keep this guidance bound to Session A.",
+  }));
+
+  fixture.switchSessionFromNavigation("session-b");
+  const accepted = await fixture.runtime.handleMessage(message("host.action", {
+    action: "steer",
+    context_revision: revision,
+    draft_revision: 13,
+    capture_id: "capture-session-action-race",
+    action_id: "capture-session-action-race:13:steer",
+  }), { sequence: 92 });
+
+  assert.equal(accepted, "accepted");
+  assert.equal(fixture.sends.length, 0);
+  assert.deepEqual(fixture.backgroundSends.map((item) => ({
+    threadId: item.threadId,
+    activeTurnId: item.activeTurnId,
+    mode: item.mode,
+    text: item.text,
+  })), [{
+    threadId: "session-a",
+    activeTurnId: "turn-a",
+    mode: "steer",
+    text: "Keep this guidance bound to Session A.",
+  }]);
+  assert.equal(fixture.runtime.readState().retainedDrafts.length, 0);
+});
+
+test("queueing a retained Session A draft never clears Session B Composer text", async () => {
+  const fixture = createFixture({ activeTurnId: "turn-a" });
+  const revision = fixture.runtime.readState().contextRevision;
+  fixture.socket.message(message("host.composer.replace", {
+    context_revision: revision,
+    draft_revision: 14,
+    capture_id: "capture-session-a-queue",
+    text: "Shared visible text.",
+  }));
+
+  fixture.switchSessionFromNavigation("session-b");
+  fixture.composer = "Shared visible text.";
+  await fixture.runtime.handleMessage(message("host.action", {
+    action: "queue",
+    context_revision: revision,
+    draft_revision: 14,
+    capture_id: "capture-session-a-queue",
+    action_id: "capture-session-a-queue:14:queue",
+  }), { sequence: 93 });
+
+  assert.equal(fixture.composer, "Shared visible text.");
+  assert.equal(fixture.runtime.readState().queuedDrafts.length, 1);
+  assert.equal(fixture.runtime.readState().queuedDrafts[0].sessionId, "session-a");
 });

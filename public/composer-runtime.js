@@ -1997,6 +1997,7 @@ async function sendMessage(event) {
       threadId: targetThreadId,
       clientSubmissionId,
       steering,
+      text: outboundText,
     });
     commitPluginVoiceInputSessionsAfterSend(submittedDraftKey, text, {
       threadId: targetThreadId,
@@ -2070,6 +2071,46 @@ async function sendMessage(event) {
       });
     }
   }
+}
+
+async function sendVoxSparkDraft(request = {}) {
+  const targetThreadId = String(request.threadId || "").trim();
+  const outboundText = String(request.text || "").trim();
+  const mode = String(request.mode || "submit");
+  const targetActiveTurnId = mode === "steer" ? String(request.activeTurnId || "").trim() : "";
+  if (!targetThreadId || !outboundText) throw new Error("invalid_voxspark_draft");
+  if (mode === "steer" && !targetActiveTurnId) throw new Error("voxspark_active_turn_missing");
+
+  const body = new FormData();
+  const clientSubmissionId = createSubmissionId();
+  body.append("clientSubmissionId", clientSubmissionId);
+  body.append("text", outboundText);
+  if (request.thread && request.thread.cwd) body.append("cwd", request.thread.cwd);
+  if (targetActiveTurnId) body.append("activeTurnId", targetActiveTurnId);
+  body.append("model", request.thread && request.thread.model || selectedComposerModel());
+  body.append("effort", request.thread && request.thread.effort || selectedComposerEffort());
+  body.append("permissionMode", effectiveDefaultPermissionMode(request.thread) || selectedComposerPermissionMode());
+  if (codexFastCommandEnabled()) body.append("fastMode", "1");
+
+  await api(`/api/threads/${encodeURIComponent(targetThreadId)}/messages`, {
+    method: "POST",
+    body,
+    timeoutMs: 180000,
+  });
+  clearDraftForKey(draftKeyForThread(targetThreadId));
+  notifyComposerSubmitted({
+    threadId: targetThreadId,
+    clientSubmissionId,
+    steering: mode === "steer",
+    text: outboundText,
+  });
+  scheduleComposerTargetRefresh(targetThreadId, 250, "voxspark-background-submit");
+  if (typeof schedulePostCompletionThreadRefreshes === "function") {
+    schedulePostCompletionThreadRefreshes(targetThreadId, [350, 750, 1200, 2400]);
+  }
+  scheduleLivePollIfNeeded(1200);
+  loadThreads({ silent: true }).catch(showError);
+  return true;
 }
 
 async function sendNewThreadMessage(text, hasContent, input) {
@@ -2369,6 +2410,7 @@ async function interruptActiveTurn(threadId = currentComposerThreadId(), activeT
     sendThreadTaskCardCommand,
     submitAtLoopRequest,
     sendMessage,
+    sendVoxSparkDraft,
     sendNewThreadMessage,
     requestComposerSubmitFromButton,
     requestAttachmentPickerFromButton,

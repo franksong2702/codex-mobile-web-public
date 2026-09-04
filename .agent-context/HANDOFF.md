@@ -6831,3 +6831,29 @@ The previous full handoff was archived and should be opened only when old proven
   selected Session. Unknown or expired revisions remain rejected.
 - Focused Host runtime/service tests pass 43/43. This candidate is isolated and
   not deployed; port 8789, Bridge 8790, ChatGPT, and BOX were not restarted.
+
+## 2026-09-05 - VoxSpark Live Closure Checkpoint
+
+- Scope: this branch is a VoxSpark integration checkpoint based on the earlier
+  private-fork checkpoint plus the accepted action-result and context-race
+  commits. It is not a replacement for upstream `main`.
+- Current browser contract: Codex Mobile publishes bounded Prompt V2 context
+  only with `CODEX_MOBILE_VOXSPARK_POLISH_CONTEXT=bounded-context-v1`; the
+  current same-Session Composer is authoritative when BOX sends, steers, or
+  queues after a keyboard edit.
+- Session isolation: a background action targets its captured Session through
+  `sendVoxSparkDraft`; it does not submit whatever Session happens to be visible.
+- Action state: a submitted draft is released only after the host accepts the
+  action. Failure or unknown retains a retryable draft. Composer submission
+  notifications include the submitted text so BOX state can reconcile a manual
+  web send.
+- Physical acceptance already observed on M15: voice text entered Composer,
+  the user edited it with the keyboard, then BOX Send delivered the edited text
+  to the intended Session and BOX cleared its stale draft controls.
+- Remaining acceptance work belongs to the VoxSpark project plan: real BOX
+  context A/B, 8/9-minute recording boundary, failure/unknown and Stop paths,
+  Queue/Steer visual receipts, identifier fidelity, correction persistence, and
+  multi-Session/network endurance.
+- Privacy: no transcript, Composer body, token, cookie, access key, or raw
+  Session body is stored in this handoff. Rich polish context remains bounded
+  and explicitly gated.

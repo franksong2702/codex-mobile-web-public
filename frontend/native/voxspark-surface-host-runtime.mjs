@@ -9,6 +9,11 @@ const SESSION_SWITCH_INTENT_MS = 3000;
 const CONTEXT_TERM_LIMIT = 32;
 const CONTEXT_TERM_CODE_POINT_LIMIT = 64;
 const CONTEXT_MESSAGE_LIMIT = 6;
+const POLISH_CONTEXT_CONSENT = "bounded-context-v1";
+const POLISH_CONTEXT_BYTE_LIMIT = 12 * 1024;
+const POLISH_COMPOSER_BYTE_LIMIT = 8 * 1024;
+const CORRECTION_RULE_LIMIT = 32;
+const CORRECTION_OCCURRENCES_REQUIRED = 2;
 const COMMON_ENGLISH_WORDS = new Set([
   "about", "after", "again", "also", "and", "are", "because", "before", "but",
   "can", "could", "earlier", "for", "from", "have", "into", "just", "more",
@@ -58,6 +63,92 @@ function visibleItemText(item) {
     .map((part) => text(part.text))
     .filter(Boolean)
     .join("\n");
+}
+
+function visibleItemRole(item) {
+  if (item && item.type === "userMessage") return "user";
+  if (item && (item.type === "agentMessage" || item.type === "plan")) return "assistant";
+  return "";
+}
+
+function utf8Bytes(value) {
+  return new TextEncoder().encode(String(value || "")).length;
+}
+
+function truncateUtf8(value, limit) {
+  let result = "";
+  let bytes = 0;
+  for (const character of String(value || "")) {
+    const nextBytes = utf8Bytes(character);
+    if (bytes + nextBytes > limit) break;
+    result += character;
+    bytes += nextBytes;
+  }
+  return result;
+}
+
+function referenceConversation(thread, composerDraft) {
+  const visible = [];
+  for (const turn of Array.isArray(thread && thread.turns) ? thread.turns : []) {
+    for (const item of Array.isArray(turn && turn.items) ? turn.items : []) {
+      const role = visibleItemRole(item);
+      const value = visibleItemText(item);
+      if (role && value) visible.push({ role, text: value });
+    }
+  }
+  let budget = Math.max(0, POLISH_CONTEXT_BYTE_LIMIT - utf8Bytes(composerDraft));
+  const selected = [];
+  for (const item of visible.slice(-CONTEXT_MESSAGE_LIMIT).reverse()) {
+    if (!budget) break;
+    const value = truncateUtf8(item.text, budget).trim();
+    if (!value) break;
+    selected.unshift({ role: item.role, text: value });
+    budget -= utf8Bytes(value);
+  }
+  return selected;
+}
+
+function inferSessionProfile(thread, title, workspace) {
+  const value = `${title || ""} ${workspace || ""} ${thread && thread.cwd || ""}`.toLocaleLowerCase("en-US");
+  if (/(日记|日志|日誌|journal|diary|daybook)/u.test(value)) return "journal";
+  if (/(产品|產品|需求|设计|設計|product|design|ux|prototype)/u.test(value)) return "product-discussion";
+  if (/(codex|代码|代碼|coding|developer|github|git|api|esp32|firmware|dsh)/u.test(value)) return "coding-agent";
+  return "general";
+}
+
+function correctionSpan(before, after) {
+  const left = Array.from(before);
+  const right = Array.from(after);
+  let prefix = 0;
+  while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < left.length - prefix && suffix < right.length - prefix
+    && left[left.length - suffix - 1] === right[right.length - suffix - 1]) suffix += 1;
+  const sharedSuffixStart = left.length - suffix;
+  let sharedTokenLength = 0;
+  while (sharedSuffixStart + sharedTokenLength < left.length
+    && /^[A-Za-z0-9_.+/-]$/.test(left[sharedSuffixStart + sharedTokenLength])) sharedTokenLength += 1;
+  suffix -= sharedTokenLength;
+  return {
+    heard: left.slice(prefix, left.length - suffix).join("").trim(),
+    write: right.slice(prefix, right.length - suffix).join("").trim(),
+  };
+}
+
+function correctionCandidate(before, after) {
+  if (!before || !after || before === after) return null;
+  const span = correctionSpan(before, after);
+  const clean = (value) => value.replace(/^[\s.,!?;:"'“”‘’()[\]{}]+|[\s.,!?;:"'“”‘’()[\]{}]+$/gu, "").trim();
+  const heard = clean(span.heard);
+  const write = clean(span.write);
+  const heardLength = Array.from(heard).length;
+  const writeLength = Array.from(write).length;
+  const valid = (value) => Array.from(value).length >= 2 && Array.from(value).length <= 40
+    && /[\p{Letter}\p{Number}]/u.test(value) && value.split(/\s+/u).length <= 3;
+  const ratio = Math.max(heardLength, writeLength) / Math.max(1, Math.min(heardLength, writeLength));
+  if (!valid(heard) || !valid(write) || ratio > 3 || heardLength + writeLength > 70
+    || heard.toLocaleLowerCase("en-US") === write.toLocaleLowerCase("en-US")) return null;
+  return { heard, write };
 }
 
 function contextSources(thread, composerDraft) {
@@ -151,6 +242,23 @@ function extractContextTerms(sources) {
   }));
 }
 
+function contextTermsWithCorrections(sources, rules) {
+  const terms = extractContextTerms(sources);
+  for (const rule of [...rules].reverse()) {
+    const value = normalizeContextTerm(rule && rule.write);
+    if (!value) continue;
+    const key = value.toLocaleLowerCase("en-US");
+    const existing = terms.find((term) => term.text.toLocaleLowerCase("en-US") === key);
+    if (existing) {
+      existing.boost = 6;
+      existing.source = "composer";
+      continue;
+    }
+    terms.unshift({ text: value, boost: 6, source: "composer" });
+  }
+  return terms.slice(0, CONTEXT_TERM_LIMIT);
+}
+
 function isSessionNavigationTarget(target) {
   if (!target || typeof target.closest !== "function") return false;
   return Boolean(target.closest(
@@ -200,6 +308,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   const composerText = deps.composerText || (() => "");
   const setComposerText = deps.setComposerText || (() => {});
   const sendMessage = deps.sendMessage || (async () => false);
+  const sendDraft = deps.sendDraft || null;
   const interruptActiveTurn = deps.interruptActiveTurn || (async () => false);
   const scheduleCurrentDraftSave = deps.scheduleCurrentDraftSave || (() => {});
   const threadTitle = deps.threadTitle || ((thread) => text(thread && (thread.name || thread.title)) || "Current Session");
@@ -212,13 +321,18 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   const setTimeoutFn = deps.setTimeout || window.setTimeout;
   const clearTimeoutFn = deps.clearTimeout || window.clearTimeout;
   const now = deps.now || Date.now;
+  let polishContextConsent = deps.polishContextConsent === POLISH_CONTEXT_CONSENT
+    ? POLISH_CONTEXT_CONSENT
+    : "";
 
   let bridgeUrl = "";
   let clientId = text(deps.clientId);
   let relayConnected = false;
   let relayInFlight = false;
+  let relayAgain = false;
   let relayServiceEpoch = "";
   let lastCommandSequence = 0;
+  const inFlightCommandSequences = new Set();
   let pendingCommandResults = [];
   let contextRevision = 0;
   let contextFingerprint = "";
@@ -228,12 +342,17 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   let sessionSwitchIntentAt = Number.NEGATIVE_INFINITY;
   let ignoredSessionId = "";
   let activeDraft = null;
+  const retainedDrafts = new Map();
   let lastReleasedDraftRevision = 0;
+  const releasedDraftRevisions = new Map();
   let queuedDrafts = [];
   let queueFlushing = false;
   let queueTurnGate = "ready";
   let pollTimer = null;
   let stopped = true;
+  const correctionObservations = new Map();
+  const acceptedCorrections = new Map();
+  let pendingCorrectionSuggestion = null;
 
   function surfaceCanArm() {
     const visible = document.visibilityState !== "hidden";
@@ -254,6 +373,52 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     const current = text(composerText());
     if (activeDraft && current === activeDraft.text) return activeDraft.baseComposerText;
     return current;
+  }
+
+  function correctionRules() {
+    return [...acceptedCorrections.values()].slice(-CORRECTION_RULE_LIMIT)
+      .map((rule) => ({ heard: rule.heard, write: rule.write }));
+  }
+
+  function polishContext(thread, composerDraft, title, workspace) {
+    if (polishContextConsent !== POLISH_CONTEXT_CONSENT) return null;
+    const boundedDraft = truncateUtf8(text(composerDraft), POLISH_COMPOSER_BYTE_LIMIT);
+    return {
+      consent: POLISH_CONTEXT_CONSENT,
+      reference_conversation: referenceConversation(thread, boundedDraft),
+      composer_draft: boundedDraft,
+      correction_rules: correctionRules(),
+      session_profile: inferSessionProfile(thread, title, workspace),
+      language_policy: "zh-CN-mixed",
+    };
+  }
+
+  function retainCurrentDraftEdits() {
+    if (!activeDraft || activeDraft.sessionId !== text(currentComposerThreadId())) return;
+    const current = text(composerText());
+    if (current) activeDraft.text = current;
+  }
+
+  function matchingDraft(message) {
+    const captureId = traceId(message && message.capture_id);
+    const revision = Number.isInteger(message && message.draft_revision) ? message.draft_revision : 0;
+    const candidates = [activeDraft, ...retainedDrafts.values()].filter(Boolean);
+    return candidates.find((draft) => (
+      draft.draftRevision === revision
+      && (!captureId || draft.captureId === captureId)
+    )) || null;
+  }
+
+  function releaseDraft(draft) {
+    if (!draft) return;
+    if (activeDraft && activeDraft.sessionId === draft.sessionId &&
+      activeDraft.draftRevision === draft.draftRevision) {
+      activeDraft = null;
+    }
+    const retained = retainedDrafts.get(draft.sessionId);
+    if (retained && retained.draftRevision === draft.draftRevision) {
+      retainedDrafts.delete(draft.sessionId);
+    }
   }
 
   function snapshotContext() {
@@ -277,15 +442,22 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     }
     const focused = surfaceKeepsOwnership(sessionId);
     const activeTurnId = text(composerTargetActiveTurnId());
+    const title = threadTitle(thread);
+    const workspace = threadWorkspace(thread);
+    const composerDraft = contextComposerDraft();
     return {
       sessionId,
-      title: threadTitle(thread),
-      workspace: threadWorkspace(thread),
+      title,
+      workspace,
       focused,
       activeTurnId,
       turnState: activeTurnId ? "running" : "idle",
       approvalPending: Boolean(approvalPending(sessionId, activeTurnId)),
-      contextTerms: extractContextTerms(contextSources(thread, contextComposerDraft())),
+      contextTerms: contextTermsWithCorrections(
+        contextSources(thread, composerDraft),
+        correctionRules()
+      ),
+      polishContext: polishContext(thread, composerDraft, title, workspace),
       armedAt,
     };
   }
@@ -305,7 +477,10 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   }
 
   function handleDocumentPointerDown(event) {
-    if (isSessionNavigationTarget(event && event.target)) sessionSwitchIntentAt = now();
+    if (isSessionNavigationTarget(event && event.target)) {
+      retainCurrentDraftEdits();
+      sessionSwitchIntentAt = now();
+    }
     syncContext();
   }
 
@@ -331,12 +506,13 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       activeTurnId: snapshot.activeTurnId,
       approvalPending: snapshot.approvalPending,
       contextTerms: snapshot.contextTerms,
+      polishContext: snapshot.polishContext,
       armedAt: snapshot.armedAt,
     });
   }
 
   function publicContext() {
-    return {
+    const context = {
       session: {
         id: currentContext.sessionId,
         title: currentContext.title,
@@ -346,7 +522,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         focused: currentContext.focused,
         ownership: activeDraft ? "voxspark" : "none",
         draft_revision: activeDraft ? activeDraft.draftRevision : 0,
-        released_draft_revision: lastReleasedDraftRevision,
+        released_draft_revision: releasedDraftRevisions.get(currentContext.sessionId) || 0,
         armed_at: currentContext.armedAt,
       },
       turn: {
@@ -357,6 +533,8 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         terms: currentContext.contextTerms,
       },
     };
+    if (currentContext.polishContext) context.polish_context = currentContext.polishContext;
+    return context;
   }
 
   async function relayContext() {
@@ -390,6 +568,20 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       const commands = Array.isArray(result && result.commands) ? result.commands : [];
       for (const command of commands) {
         if (!Number.isInteger(command.sequence) || command.sequence <= lastCommandSequence) continue;
+        if (command.message && command.message.type === "host.action" && traceId(command.message.action_id)) {
+          if (inFlightCommandSequences.has(command.sequence)) break;
+          inFlightCommandSequences.add(command.sequence);
+          void handleMessage(command.message, { sequence: command.sequence }).finally(() => {
+            inFlightCommandSequences.delete(command.sequence);
+            lastCommandSequence = Math.max(lastCommandSequence, command.sequence);
+            relayAgain = true;
+            if (!relayInFlight) {
+              relayAgain = false;
+              void relayContext();
+            }
+          });
+          break;
+        }
         const outcome = await handleMessage(command.message, { sequence: command.sequence });
         if (outcome === COMMAND_RETRY) break;
         lastCommandSequence = command.sequence;
@@ -401,6 +593,10 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       return false;
     } finally {
       relayInFlight = false;
+      if (relayAgain && !stopped) {
+        relayAgain = false;
+        Promise.resolve().then(() => relayContext());
+      }
     }
   }
 
@@ -415,10 +611,12 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       contextFingerprint = fingerprint;
       currentContext = Object.assign({}, snapshot, { revision: contextRevision });
       if (previousSessionId && previousSessionId !== snapshot.sessionId) {
-        activeDraft = null;
-        queuedDrafts = [];
+        if (activeDraft) retainedDrafts.set(previousSessionId, activeDraft);
+        activeDraft = retainedDrafts.get(snapshot.sessionId) || null;
+        retainedDrafts.delete(snapshot.sessionId);
+        if (activeDraft) activeDraft.contextRevision = contextRevision;
         queueTurnGate = "ready";
-        diagnostic("session_changed_drafts_cleared");
+        diagnostic("session_changed_drafts_preserved");
       } else if (activeDraft) {
         activeDraft.contextRevision = contextRevision;
       }
@@ -432,6 +630,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       flushQueuedDrafts().catch(() => {});
       return changed;
     }
+    if (relayInFlight) relayAgain = true;
     relayContext().catch(() => {});
     flushQueuedDrafts().catch(() => {});
     return true;
@@ -466,10 +665,13 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     const composerDraft = appendComposerText(baseComposerText, draftText);
     activeDraft = {
       sessionId: currentContext.sessionId,
+      thread: composerTargetThread() || {},
+      activeTurnId: currentContext.activeTurnId,
       contextRevision: currentContext.revision,
       draftRevision: message.draft_revision,
       captureId: traceId(message.capture_id),
       baseComposerText,
+      voiceText: draftText,
       text: composerDraft,
       receivedAt: now(),
     };
@@ -479,6 +681,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   }
 
   function clearComposerIfOwned(draft) {
+    if (!currentContext || currentContext.sessionId !== draft.sessionId) return;
     if (text(composerText()) === draft.text) {
       setComposerText("");
       scheduleCurrentDraftSave();
@@ -487,10 +690,18 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
 
   function handleComposerSubmission(submission = {}) {
     const submittedSessionId = text(submission.threadId);
-    if (!activeDraft || !submittedSessionId || activeDraft.sessionId !== submittedSessionId) return false;
-    const releasedDraftRevision = activeDraft.draftRevision;
-    activeDraft = null;
+    const draft = activeDraft && activeDraft.sessionId === submittedSessionId
+      ? activeDraft
+      : retainedDrafts.get(submittedSessionId);
+    if (!draft || !submittedSessionId) return false;
+    observeCorrection(draft, text(submission.text));
+    const releasedDraftRevision = draft.draftRevision;
+    releaseDraft(draft);
     lastReleasedDraftRevision = Math.max(lastReleasedDraftRevision, releasedDraftRevision);
+    releasedDraftRevisions.set(submittedSessionId, Math.max(
+      releasedDraftRevisions.get(submittedSessionId) || 0,
+      releasedDraftRevision,
+    ));
     diagnostic("composer_draft_released_after_submit", {
       draftRevision: releasedDraftRevision,
     });
@@ -498,8 +709,48 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     return true;
   }
 
+  function observeCorrection(draft, submittedText) {
+    if (!submittedText || !draft.voiceText) return null;
+    const prefix = draft.baseComposerText ? `${draft.baseComposerText} ` : "";
+    if (prefix && !submittedText.startsWith(prefix)) return null;
+    const candidate = correctionCandidate(draft.voiceText, prefix ? submittedText.slice(prefix.length) : submittedText);
+    if (!candidate) return null;
+    const key = `${candidate.heard.toLocaleLowerCase("en-US")}\u0000${candidate.write.toLocaleLowerCase("en-US")}`;
+    const count = (correctionObservations.get(key) || 0) + 1;
+    correctionObservations.set(key, count);
+    if (count >= CORRECTION_OCCURRENCES_REQUIRED && !acceptedCorrections.has(key)) {
+      pendingCorrectionSuggestion = { ...candidate, occurrences: count };
+    }
+    return candidate;
+  }
+
+  function acceptCorrection(heard, write) {
+    const candidate = correctionCandidate(String(heard || ""), String(write || ""));
+    if (!candidate || !pendingCorrectionSuggestion
+      || candidate.heard !== pendingCorrectionSuggestion.heard
+      || candidate.write !== pendingCorrectionSuggestion.write) return false;
+    const key = `${candidate.heard.toLocaleLowerCase("en-US")}\u0000${candidate.write.toLocaleLowerCase("en-US")}`;
+    acceptedCorrections.set(key, candidate);
+    pendingCorrectionSuggestion = null;
+    contextFingerprint = "";
+    syncContext({ force: true });
+    return true;
+  }
+
   async function submitDraft(draft, mode, options = {}) {
-    if (!currentContext || draft.sessionId !== currentContext.sessionId) return COMMAND_DISCARD;
+    if (!currentContext) return COMMAND_RETRY;
+    if (draft.sessionId !== currentContext.sessionId) {
+      if (typeof sendDraft !== "function") return COMMAND_RETRY;
+      await sendDraft({
+        threadId: draft.sessionId,
+        thread: draft.thread || {},
+        activeTurnId: draft.activeTurnId || "",
+        text: draft.text,
+        mode,
+      });
+      releaseDraft(draft);
+      return COMMAND_ACCEPTED;
+    }
     if (currentContext.approvalPending) return COMMAND_DISCARD;
     const running = Boolean(text(composerTargetActiveTurnId()));
     if (mode === "submit" && running) return COMMAND_DISCARD;
@@ -514,7 +765,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     }
     await sendMessage({ preventDefault() {} });
     if (text(composerText()) === draft.text) return COMMAND_RETRY;
-    if (activeDraft && activeDraft.draftRevision === draft.draftRevision) activeDraft = null;
+    releaseDraft(draft);
     return COMMAND_ACCEPTED;
   }
 
@@ -523,17 +774,14 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     if (queueTurnGate !== "ready") return false;
     if (currentContext.approvalPending || text(composerTargetActiveTurnId())) return false;
     if (!currentContext.focused || text(composerText())) return false;
-    const draft = queuedDrafts[0];
-    if (draft.sessionId !== currentContext.sessionId) {
-      queuedDrafts.shift();
-      diagnostic("queued_draft_discarded_session_changed");
-      return false;
-    }
+    const draftIndex = queuedDrafts.findIndex((draft) => draft.sessionId === currentContext.sessionId);
+    if (draftIndex < 0) return false;
+    const draft = queuedDrafts[draftIndex];
     queueFlushing = true;
     try {
       const outcome = await submitDraft(draft, "submit", { restoreWhenEmpty: true });
       if (outcome === COMMAND_ACCEPTED) {
-        queuedDrafts.shift();
+        queuedDrafts.splice(draftIndex, 1);
         queueTurnGate = "awaiting_running";
       }
       return outcome === COMMAND_ACCEPTED;
@@ -550,13 +798,20 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       await interruptActiveTurn(currentContext.sessionId, text(composerTargetActiveTurnId()));
       return COMMAND_ACCEPTED;
     }
-    if (!revisionsMatch(message, true)) return COMMAND_RETRY;
-    if (currentContext.approvalPending) return COMMAND_DISCARD;
-    const draft = Object.assign({}, activeDraft);
+    retainCurrentDraftEdits();
+    const matchedDraft = matchingDraft(message);
+    if (!matchedDraft) return COMMAND_RETRY;
+    if (matchedDraft.sessionId === currentContext.sessionId && !revisionsMatch(message, true)) {
+      return COMMAND_RETRY;
+    }
+    if (matchedDraft.sessionId === currentContext.sessionId && currentContext.approvalPending) {
+      return COMMAND_DISCARD;
+    }
+    const draft = Object.assign({}, matchedDraft);
     if (action === "queue") {
       if (!text(composerTargetActiveTurnId())) return COMMAND_DISCARD;
       queuedDrafts.push(draft);
-      activeDraft = null;
+      releaseDraft(matchedDraft);
       clearComposerIfOwned(draft);
       return COMMAND_ACCEPTED;
     }
@@ -677,6 +932,15 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     return start();
   }
 
+  function configurePolishContextConsent(value) {
+    const next = value === POLISH_CONTEXT_CONSENT ? POLISH_CONTEXT_CONSENT : "";
+    if (next === polishContextConsent) return Boolean(next);
+    polishContextConsent = next;
+    contextFingerprint = "";
+    syncContext({ force: true });
+    return Boolean(next);
+  }
+
   function stop() {
     stopped = true;
     if (pollTimer) clearIntervalFn(pollTimer);
@@ -702,19 +966,27 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       contextRevision,
       currentContext: currentContext ? Object.assign({}, currentContext) : null,
       activeDraft: activeDraft ? Object.assign({}, activeDraft) : null,
+      retainedDrafts: [...retainedDrafts.values()].map((draft) => Object.assign({}, draft)),
       lastReleasedDraftRevision,
       queuedDrafts: queuedDrafts.map((draft) => Object.assign({}, draft)),
       queueTurnGate,
       pendingCommandResults: pendingCommandResults.map((item) => Object.assign({}, item)),
+      polishContextConsent,
+      pendingCorrectionSuggestion: pendingCorrectionSuggestion
+        ? Object.assign({}, pendingCorrectionSuggestion)
+        : null,
+      correctionRules: correctionRules(),
     };
   }
 
   return {
     configureBridgeUrl,
+    configurePolishContextConsent,
     start,
     stop,
     syncContext,
     handleComposerSubmission,
+    acceptCorrection,
     handleMessage,
     flushQueuedDrafts,
     readState,
@@ -724,7 +996,9 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
 const api = Object.freeze({
   CONTRACT,
   STORAGE_BRIDGE_URL,
+  POLISH_CONTEXT_CONSENT,
   appendComposerText,
+  correctionCandidate,
   safeBridgeUrl,
   bridgeUrlFromRuntime,
   createVoxSparkSurfaceHostRuntime,
@@ -736,7 +1010,9 @@ voxsparkSurfaceHostRoot.CodexVoxSparkSurfaceHostRuntime = api;
 export {
   CONTRACT,
   STORAGE_BRIDGE_URL,
+  POLISH_CONTEXT_CONSENT,
   appendComposerText,
+  correctionCandidate,
   safeBridgeUrl,
   bridgeUrlFromRuntime,
   createVoxSparkSurfaceHostRuntime,

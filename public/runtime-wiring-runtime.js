@@ -198,6 +198,7 @@ function initializeVoxSparkSurfaceHostRuntimeWiring() {
     composerText: composer.composerText,
     setComposerText: composer.setComposerText,
     sendMessage: composer.sendMessage,
+    sendDraft: composer.sendVoxSparkDraft,
     interruptActiveTurn: composer.interruptActiveTurn,
     scheduleCurrentDraftSave,
     threadTitle: (thread) => threadDisplayName(thread),

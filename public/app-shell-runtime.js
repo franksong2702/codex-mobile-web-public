@@ -883,9 +883,13 @@ async function start() {
     config.voxspark
     && config.voxspark.enabled
     && window.voxsparkSurfaceHostRuntime
-    && !window.voxsparkSurfaceHostRuntime.readState().enabled
   ) {
-    window.voxsparkSurfaceHostRuntime.configureBridgeUrl(config.voxspark.bridgeUrl);
+    if (typeof window.voxsparkSurfaceHostRuntime.configurePolishContextConsent === "function") {
+      window.voxsparkSurfaceHostRuntime.configurePolishContextConsent(config.voxspark.polishContextConsent);
+    }
+    if (!window.voxsparkSurfaceHostRuntime.readState().enabled) {
+      window.voxsparkSurfaceHostRuntime.configureBridgeUrl(config.voxspark.bridgeUrl);
+    }
   }
   initializePageBuildState(config);
   startPageRefreshChecks();

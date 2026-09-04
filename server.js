@@ -236,6 +236,7 @@ const {
   CHATGPT_PRO_BRIDGE_ENABLED,
   CHATGPT_PRO_PLANNER_DIR,
   VOXSPARK_BRIDGE_URL,
+  VOXSPARK_POLISH_CONTEXT_CONSENT,
   CHATGPT_PRO_MCP_TOKEN,
   CHATGPT_PRO_MCP_TOKEN_FILE,
   CHATGPT_PRO_MCP_ALLOW_DIRECT_TASK_CARDS,
@@ -1898,6 +1899,7 @@ const chatGptProRuntimeService = createChatGptProRuntimeService({
 });
 const voxsparkSurfaceHostService = createVoxSparkSurfaceHostService({
   defaultBridgeUrl: VOXSPARK_BRIDGE_URL,
+  polishContextConsent: VOXSPARK_POLISH_CONTEXT_CONSENT,
   logger: console,
 });
 const {

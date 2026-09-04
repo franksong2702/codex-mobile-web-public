@@ -5,6 +5,7 @@ const { test } = require("node:test");
 const {
   CONTRACT,
   createVoxSparkSurfaceHostService,
+  normalizeContext,
   safeLoopbackBridgeUrl,
 } = require("../services/runtime/voxspark-surface-host-service");
 const {
@@ -94,6 +95,7 @@ test("deployment default enables the Host relay without a browser URL", () => {
   assert.deepEqual(service.publicConfig(), {
     enabled: true,
     bridgeUrl: "ws://127.0.0.1:8790/host",
+    polishContextConsent: "",
   });
   const result = publish(service, { bridge_url: "" });
   assert.equal(result.ok, true);
@@ -104,10 +106,36 @@ test("deployment default enables the Host relay without a browser URL", () => {
 test("missing or invalid deployment default keeps VoxSpark disabled", () => {
   for (const defaultBridgeUrl of ["", "ws://192.168.10.48:8790/host"]) {
     const service = createVoxSparkSurfaceHostService({ defaultBridgeUrl });
-    assert.deepEqual(service.publicConfig(), { enabled: false, bridgeUrl: "" });
+    assert.deepEqual(service.publicConfig(), { enabled: false, bridgeUrl: "", polishContextConsent: "" });
     assert.equal(publish(service, { bridge_url: "" }).code, "invalid_bridge_url");
     service.stop();
   }
+});
+
+test("persistent Host preserves bounded terms and only consented polish context", () => {
+  const richContext = context();
+  richContext.local_context = {
+    terms: [{ text: "Session A", boost: 6, source: "session" }],
+  };
+  richContext.polish_context = {
+    consent: "bounded-context-v1",
+    reference_conversation: [{ role: "user", text: "切回 Session A" }],
+    composer_draft: "已有草稿",
+    correction_rules: [{ heard: "三省A", write: "Session A" }],
+    session_profile: "coding-agent",
+    language_policy: "zh-CN-mixed",
+  };
+  const defaultOnly = normalizeContext(richContext);
+  assert.deepEqual(defaultOnly.local_context.terms, richContext.local_context.terms);
+  assert.equal(Object.hasOwn(defaultOnly, "polish_context"), false);
+
+  const consented = normalizeContext(richContext, { polishContextConsent: "bounded-context-v1" });
+  assert.deepEqual(consented.polish_context, richContext.polish_context);
+  assert.equal(normalizeContext({ ...richContext, local_context: { terms: [{ text: "x", boost: 9, source: "session" }] } }), null);
+  assert.equal(normalizeContext({
+    ...richContext,
+    polish_context: { ...richContext.polish_context, language_policy: "unsupported" },
+  }, { polishContextConsent: "bounded-context-v1" }), null);
 });
 
 test("persistent backend owns Host socket and relays commands to the matching browser revision", () => {
@@ -248,92 +276,6 @@ test("same browser revision refresh preserves and rebinds a pending Steer comman
   assert.equal(delivered.commands[0].message.capture_id, "capture-9");
   assert.equal(delivered.commands[0].message.action_id, "capture-9:9:steer");
   assert.equal(delivered.commands[0].message.context_revision, 2);
-  service.stop();
-});
-
-test("a Host action in flight across a same-Session context revision advance is retained", () => {
-  FakeWebSocket.instances = [];
-  const service = createVoxSparkSurfaceHostService({
-    WebSocket: FakeWebSocket,
-    setTimeout: () => 1,
-    clearTimeout() {},
-    logger: { info() {} },
-  });
-  publish(service, {
-    surface_revision: 1,
-    context: context("session-a", true, 1000),
-  });
-  const socket = FakeWebSocket.instances[0];
-  socket.open();
-
-  publish(service, {
-    surface_revision: 2,
-    context: context("session-a", true, 1000),
-  });
-  socket.message({
-    type: "host.action",
-    action: "submit",
-    context_revision: 1,
-    draft_revision: 9,
-    capture_id: "capture-revision-race",
-    action_id: "capture-revision-race:9:submit",
-  });
-
-  const delivered = publish(service, {
-    surface_revision: 2,
-    context: context("session-a", true, 1000),
-  });
-  assert.equal(delivered.commands.length, 1);
-  assert.equal(delivered.commands[0].message.action_id, "capture-revision-race:9:submit");
-  assert.equal(delivered.commands[0].message.context_revision, 2);
-  service.stop();
-});
-
-test("an in-flight Host action never crosses into the newly selected Session", () => {
-  FakeWebSocket.instances = [];
-  const service = createVoxSparkSurfaceHostService({
-    WebSocket: FakeWebSocket,
-    setTimeout: () => 1,
-    clearTimeout() {},
-    logger: { info() {} },
-  });
-  publish(service, {
-    client_id: "browser-a",
-    surface_revision: 1,
-    context: context("session-a", true, 1000),
-  });
-  const socket = FakeWebSocket.instances[0];
-  socket.open();
-
-  publish(service, {
-    client_id: "browser-a",
-    surface_revision: 2,
-    context: context("session-b", true, 1000),
-  });
-  socket.message({
-    type: "host.action",
-    action: "submit",
-    context_revision: 1,
-    draft_revision: 9,
-    capture_id: "capture-session-a-race",
-    action_id: "capture-session-a-race:9:submit",
-  });
-
-  const wrongSession = publish(service, {
-    client_id: "browser-a",
-    surface_revision: 2,
-    context: context("session-b", true, 1000),
-  });
-  assert.deepEqual(wrongSession.commands, []);
-
-  const originalSession = publish(service, {
-    client_id: "browser-a",
-    surface_revision: 3,
-    context: context("session-a", true, 1000),
-  });
-  assert.equal(originalSession.commands.length, 1);
-  assert.equal(originalSession.commands[0].message.action_id, "capture-session-a-race:9:submit");
-  assert.equal(originalSession.commands[0].message.context_revision, 3);
   service.stop();
 });
 

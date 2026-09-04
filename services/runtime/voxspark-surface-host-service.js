@@ -8,6 +8,14 @@ const DEFAULT_RECONNECT_MS = 1_500;
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 const MAX_PENDING_COMMANDS = 16;
 const MAX_CONTEXT_OWNERS = 32;
+const MAX_CONTEXT_TERMS = 32;
+const MAX_REFERENCE_MESSAGES = 6;
+const MAX_REFERENCE_BYTES = 12 * 1024;
+const MAX_COMPOSER_BYTES = 8 * 1024;
+const MAX_CORRECTION_RULES = 32;
+const POLISH_CONTEXT_CONSENT = "bounded-context-v1";
+const SESSION_PROFILES = new Set(["general", "coding-agent", "journal", "product-discussion"]);
+const LANGUAGE_POLICIES = new Set(["auto", "zh-CN-mixed"]);
 
 function boundedText(value, maxLength) {
   return String(value == null ? "" : value).trim().slice(0, maxLength);
@@ -16,6 +24,65 @@ function boundedText(value, maxLength) {
 function traceId(value) {
   const candidate = boundedText(value, 96);
   return /^[A-Za-z0-9._:-]+$/.test(candidate) ? candidate : "";
+}
+
+function utf8Bytes(value) {
+  return Buffer.byteLength(String(value || ""), "utf8");
+}
+
+function normalizeContextTerms(value) {
+  if (!Array.isArray(value) || value.length > MAX_CONTEXT_TERMS) return null;
+  const terms = [];
+  for (const item of value) {
+    const term = boundedText(item && item.text, 64);
+    const boost = Number(item && item.boost);
+    const source = item && item.source;
+    if (!term || Array.from(term).length > 64 || !Number.isInteger(boost)
+      || boost < 2 || boost > 6 || (source !== "session" && source !== "composer")) return null;
+    terms.push({ text: term, boost, source });
+  }
+  return terms;
+}
+
+function normalizePolishContext(value, expectedConsent) {
+  if (!expectedConsent) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || value.consent !== expectedConsent || value.consent !== POLISH_CONTEXT_CONSENT) return null;
+  const conversation = value.reference_conversation;
+  const composerDraft = typeof value.composer_draft === "string" ? value.composer_draft.trim() : "";
+  const correctionRules = value.correction_rules;
+  if (!Array.isArray(conversation) || conversation.length > MAX_REFERENCE_MESSAGES
+    || !Array.isArray(correctionRules) || correctionRules.length > MAX_CORRECTION_RULES
+    || utf8Bytes(composerDraft) > MAX_COMPOSER_BYTES) return null;
+  const referenceConversation = [];
+  let referenceBytes = utf8Bytes(composerDraft);
+  for (const item of conversation) {
+    const role = item && item.role;
+    const messageText = typeof item?.text === "string" ? item.text.trim() : "";
+    if ((role !== "user" && role !== "assistant") || !messageText) return null;
+    referenceBytes += utf8Bytes(messageText);
+    if (referenceBytes > MAX_REFERENCE_BYTES) return null;
+    referenceConversation.push({ role, text: messageText });
+  }
+  const normalizedRules = [];
+  for (const item of correctionRules) {
+    const heard = boundedText(item && item.heard, 64);
+    const write = boundedText(item && item.write, 64);
+    if (!heard || !write || heard === write
+      || Array.from(heard).length > 64 || Array.from(write).length > 64) return null;
+    normalizedRules.push({ heard, write });
+  }
+  const sessionProfile = String(value.session_profile || "");
+  const languagePolicy = String(value.language_policy || "");
+  if (!SESSION_PROFILES.has(sessionProfile) || !LANGUAGE_POLICIES.has(languagePolicy)) return null;
+  return {
+    consent: POLISH_CONTEXT_CONSENT,
+    reference_conversation: referenceConversation,
+    composer_draft: composerDraft,
+    correction_rules: normalizedRules,
+    session_profile: sessionProfile,
+    language_policy: languagePolicy,
+  };
 }
 
 function commandTrace(message) {
@@ -52,14 +119,18 @@ function safeLoopbackBridgeUrl(value) {
   }
 }
 
-function normalizeContext(value) {
+function normalizeContext(value, options = {}) {
   const input = value && typeof value === "object" ? value : {};
   const session = input.session && typeof input.session === "object" ? input.session : {};
   const composer = input.composer && typeof input.composer === "object" ? input.composer : {};
   const turn = input.turn && typeof input.turn === "object" ? input.turn : {};
   const sessionId = boundedText(session.id, 128);
   if (!sessionId) return null;
-  return {
+  const localContext = input.local_context && typeof input.local_context === "object"
+    ? normalizeContextTerms(input.local_context.terms)
+    : [];
+  if (localContext === null) return null;
+  const normalized = {
     session: {
       id: sessionId,
       title: boundedText(session.title, 160) || "Current Session",
@@ -83,7 +154,12 @@ function normalizeContext(value) {
       state: turn.state === "running" ? "running" : "idle",
       approval_pending: turn.approval_pending === true,
     },
+    local_context: { terms: localContext },
   };
+  const polishContext = normalizePolishContext(input.polish_context, options.polishContextConsent);
+  if (options.polishContextConsent && input.polish_context != null && !polishContext) return null;
+  if (polishContext) normalized.polish_context = polishContext;
+  return normalized;
 }
 
 function createVoxSparkSurfaceHostService(options = {}) {
@@ -96,6 +172,9 @@ function createVoxSparkSurfaceHostService(options = {}) {
   const connectTimeoutMs = Math.max(500, Number(options.connectTimeoutMs || DEFAULT_CONNECT_TIMEOUT_MS));
   const logger = options.logger || console;
   const defaultBridgeUrl = safeLoopbackBridgeUrl(options.defaultBridgeUrl);
+  const polishContextConsent = options.polishContextConsent === POLISH_CONTEXT_CONSENT
+    ? POLISH_CONTEXT_CONSENT
+    : "";
   const serviceEpoch = traceId(options.serviceEpoch) || crypto.randomUUID();
 
   let bridgeUrl = "";
@@ -296,7 +375,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
     if (!urlAccepted) return { ok: false, code: "invalid_bridge_url" };
     const clientId = boundedText(input.client_id, 128);
     const surfaceRevision = Number(input.surface_revision);
-    const context = normalizeContext(input.context);
+    const context = normalizeContext(input.context, { polishContextConsent });
     if (!clientId || !Number.isInteger(surfaceRevision) || surfaceRevision < 1 || !context) {
       return { ok: false, code: "invalid_context" };
     }
@@ -488,6 +567,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
     return {
       enabled: Boolean(defaultBridgeUrl),
       bridgeUrl: defaultBridgeUrl,
+      polishContextConsent,
     };
   }
 
@@ -514,5 +594,6 @@ module.exports = {
   CONTRACT,
   createVoxSparkSurfaceHostService,
   normalizeContext,
+  normalizePolishContext,
   safeLoopbackBridgeUrl,
 };

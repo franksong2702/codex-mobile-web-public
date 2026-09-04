@@ -105,6 +105,66 @@ test("composer runtime receives composer target thread as an explicit dependency
   assert.equal(runtime.effectiveDefaultPermissionMode(), "ask");
 });
 
+test("VoxSpark can submit to its original Session without touching the visible Composer", async () => {
+  const requests = [];
+  const clearedDrafts = [];
+  const submissions = [];
+  const runtime = composerRuntime.createComposerRuntime({
+    state: {
+      newThreadDraft: false,
+      composerModel: "",
+      composerEffort: "",
+      composerPermissionMode: "",
+      defaultModel: "gpt-test",
+      defaultReasoningEffort: "medium",
+      codexFastMode: false,
+    },
+    composerTargetThread: () => ({ id: "session-b" }),
+    effectiveComposerPermissionMode: (value) => value || "default",
+    defaultNewThreadPermissionMode: () => "default",
+    createSubmissionId: () => "submission-a",
+    api: async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true };
+    },
+    draftKeyForThread: (threadId) => `thread:${threadId}`,
+    clearDraftForKey: (key) => clearedDrafts.push(key),
+    onComposerSubmitted: (details) => submissions.push(details),
+    scheduleComposerTargetRefresh() {},
+    schedulePostCompletionThreadRefreshes() {},
+    scheduleLivePollIfNeeded() {},
+    loadThreads: async () => {},
+    showError() {},
+  });
+
+  await runtime.sendVoxSparkDraft({
+    threadId: "session-a",
+    thread: {
+      cwd: "/tmp/session-a",
+      model: "session-a-model",
+      effort: "high",
+      runtimeSettings: { permissionMode: "ask" },
+    },
+    activeTurnId: "turn-a",
+    mode: "steer",
+    text: "Route this draft to Session A.",
+  });
+
+  assert.equal(requests[0].url, "/api/threads/session-a/messages");
+  assert.equal(requests[0].options.body.get("activeTurnId"), "turn-a");
+  assert.equal(requests[0].options.body.get("text"), "Route this draft to Session A.");
+  assert.equal(requests[0].options.body.get("model"), "session-a-model");
+  assert.equal(requests[0].options.body.get("effort"), "high");
+  assert.equal(requests[0].options.body.get("permissionMode"), "ask");
+  assert.deepEqual(clearedDrafts, ["thread:session-a"]);
+  assert.deepEqual(submissions, [{
+    threadId: "session-a",
+    clientSubmissionId: "submission-a",
+    steering: true,
+    text: "Route this draft to Session A.",
+  }]);
+});
+
 test("composer bridge runtime preserves CommonJS and legacy global entry points", () => {
   assert.equal(typeof composerBridgeRuntime.createComposerBridgeRuntime, "function");
   const bridge = composerBridgeRuntime.createComposerBridgeRuntime();

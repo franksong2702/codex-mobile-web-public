@@ -1,6 +1,6 @@
 # VoxSpark Surface Host Adapter
 
-Status: Phase 2P short-cycle physical acceptance complete; endurance validation remains open
+Status: persistent backend Host relay deployed; physical BOX reliability validation in progress
 
 ## Boundary
 
@@ -16,6 +16,15 @@ target, turn state, and approval presence to the authenticated backend route.
 It does not send Session bodies, repository content, credentials, or approval
 decisions to BOX.
 
+The default cloud-polish path remains transcript plus bounded terms. Rich
+polish context is enabled only when the listener is started with
+`CODEX_MOBILE_VOXSPARK_POLISH_CONTEXT=bounded-context-v1`. In that mode the
+browser sends at most six recent visible user/assistant messages, a bounded
+Composer draft, an inferred Session profile, the simplified-Chinese
+mixed-language policy, and explicitly accepted correction rules. Command and
+tool output items are excluded. The persistent Host validates the same bounds
+before forwarding the envelope to Bridge.
+
 The browser target lease expires after 30 seconds without renewal. Expiry sends
 an unfocused context to Bridge and clears pending hardware commands, while the
 backend keeps the Host connection alive. Rebinding requires the same browser to
@@ -24,39 +33,17 @@ restricted to an exact credential-free loopback `ws://.../host` endpoint.
 
 A context or surface revision update from the same browser and Session preserves
 pending hardware commands and rebinds them to the new surface revision. A real
-browser or Session ownership change does not transfer those commands to the new
-target. This keeps normal active-turn refreshes from racing the 500 ms browser
-relay poll and silently dropping a newly queued Send, Steer, or Queue command.
-
-The persistent Host also keeps a bounded ownership record for the latest 32
-Bridge context revisions, with each record expiring after at most two target
-leases. This closes the reverse-direction race where the browser has already
-published a newer surface revision but Bridge sends an action using the prior
-revision still in flight. An action from the same Session is rebound to the
-latest surface revision. An action owned by another Session is never delivered
-to the newly selected Session; it remains scoped to its original Session until
-that Session returns. Unknown or expired revisions are still rejected.
+browser ownership change does not transfer commands to that browser. A Session
+switch retains commands under the original Session and delivers them again only
+when that Session owns the Surface. This keeps normal active-turn refreshes and
+navigation from racing the browser relay poll and silently dropping a newly
+queued Send, Steer, or Queue command.
 
 Composer replacement and Host action commands retain the originating bounded
-`capture_id`. Actions additionally carry a Bridge-issued unique `action_id`, while the
+`capture_id`. Actions additionally carry a deterministic `action_id`, while the
 backend's monotonically increasing command sequence remains the delivery-order
 coordinate. Backend and browser diagnostics log only these ids, action type,
 outcome, and sequence; they never log transcript text or Composer contents.
-
-Command sequence is scoped to one backend service instance. Every relay response
-includes a bounded `service_epoch`; the browser returns both that epoch and its
-`after_sequence` watermark. The backend acknowledges or filters commands only
-when the epoch matches. After a backend restart, the browser adopts the new
-epoch and resets its sequence watermark before receiving new commands.
-
-Action execution has a separate result handshake. After one `host.action`
-attempt, the browser reports only `action_id`, success/failure, retryability,
-and a bounded error code. It advances the command sequence and never
-automatically repeats an ambiguous Codex action. The persistent Host service
-forwards `host.action.result`, retains and replays it across Bridge reconnects,
-and removes it only after `bridge.action.ack`. A bounded receipt list makes a
-duplicate browser upload idempotent when the previous HTTP response was lost.
-Transcript text, Composer contents, and Session bodies are excluded.
 
 ## Activation
 
@@ -79,6 +66,10 @@ that remains stuck in `CONNECTING`, or emits an error without a close event, is
 discarded before the normal reconnect loop continues.
 Pairing and transport authentication remain outside this pilot.
 
+`CODEX_MOBILE_VOXSPARK_POLISH_CONTEXT` is independent from Bridge activation.
+An absent or incorrect value omits `polish_context`; it does not disable BOX
+input or the existing bounded `local_context.terms` path.
+
 ## Actions
 
 - `host.composer.replace` writes one finalized draft into the currently focused
@@ -100,6 +91,20 @@ being acknowledged as discarded; returning to its original Session rebinds it
 to the new surface revision before Send can run. Approval state only blocks
 hardware actions and tells BOX to hand control back to the computer.
 
+Within the same Session, the currently visible non-empty Composer is the
+authoritative text for BOX Send, Steer, and Queue. Keyboard edits made after a
+voice draft arrives are retained rather than rejected as a changed Composer.
+The original capture id, draft revision, Session ownership, approval, and turn
+state gates still apply. Once an action is forwarded, BOX leaves draft actions
+for processing; Host success clears the matching draft, while explicit failure
+or unknown restores it for recovery.
+
+Host actions execute asynchronously from context publication but remain
+strictly ordered. While a slow Send is running, navigation immediately
+publishes the newly selected Session. The browser does not advance the command
+read cursor until the action result exists, so the persistent backend can
+accept and replay that result before removing the command.
+
 After a successful Send, Codex Mobile normally blurs the Composer. The adapter
 keeps the selected Composer target armed without restoring DOM focus or opening
 the software keyboard, so a second hardware draft can still arrive. The
@@ -119,15 +124,23 @@ wins the backend arbitration.
 
 ## Current Validation
 
+- Browser and persistent Host tests prove that `local_context.terms` survives
+  the Node relay. This closes an implementation gap where the browser generated
+  terms but backend normalization discarded the field.
+- Prompt V2 tests prove that rich context is absent by default, appears only
+  with the exact consent value, excludes command output, and stays within the
+  six-message/12-KiB/8-KiB/32-rule bounds.
+- Successful submission of a manually edited VoxSpark draft can produce an
+  in-memory correction candidate. Two identical bounded corrections are needed
+  before a suggestion appears. `acceptCorrection()` is explicit; no candidate
+  is silently persisted. An accepted preferred spelling is reused as both a
+  high-weight ASR term and a deterministic polish rule for later captures in
+  that page process. The visible confirmation UI and durable local store are
+  not implemented in this checkpoint.
+
 - Backend unit tests cover loopback-only URL validation, persistent Host socket
   ownership, context-revision translation, command delivery, lease expiry and
   recovery, plus the authenticated route boundary.
-- Context-race tests cover an action arriving on the immediately preceding
-  Bridge revision, same-Session rebinding, and non-delivery to a newly selected
-  Session.
-- Action-result tests cover browser success/failure reporting, no automatic
-  retry, persistent replay, Bridge acknowledgement, and duplicate upload
-  receipts. These are source-level tests and have not been deployed to M15.
 - Browser unit tests cover the relay transport and existing final-only draft,
   Send, Queue, Steer, Stop, blur, visibility, and Session-switch behavior.
 - Correlation tests cover Composer confirmation, action confirmation/retry, and
@@ -217,11 +230,23 @@ wins the backend arbitration.
   and foreground, migrates that binding on Session navigation, and still gives
   up ownership when hidden or backgrounded. The focused Host runtime/service
   suite passes `27/27`, including the new refresh/navigation regression.
-- The isolated Checkpoint 1 candidate based on `5f5d8e92` passes focused tests
-  `95/95`, full tests `2668/2668`, `npm run check`, `git diff --check`, and the
-  complete frontend build. Its build id is
-  `codex-mobile-shell-v625-e137c04e3220`.
-- The deployed Phase 2P path separately passed a physical browser-submit
-  release check: after delivered and acknowledged, the matching BOX draft and
-  Queue/Steer actions cleared in about 693 ms. This is short-cycle functional
-  evidence, not nine-minute or daily-use endurance evidence.
+
+## 2026-09-05 Live Closure
+
+- The live listener publishes VoxSpark enabled with loopback `/host` and exact
+  Prompt V2 consent `bounded-context-v1`. Chrome loaded shell
+  `0.1.11|codex-mobile-shell-v625-245c32485560`.
+- A regression now proves that BOX Send submits the current complete Composer
+  after a same-Session keyboard edit, clears the Composer, releases the active
+  draft, and reports Host success. Focused Host tests pass `32/32`; the prior
+  full repository run passed `2698/2698`.
+- Bridge state tests prove the forwarded action immediately projects
+  `processing` with no draft actions, then clears the draft on Host success and
+  follows the live Session state. Failure and unknown keep a retryable draft.
+- The user physically repeated the manual-edit flow and confirmed the edited
+  message reached the intended Session. The latest content-free log result was
+  `host_action_confirmed`, action `submit`, outcome `accepted`.
+- Prompt V2 model quality is evaluated and governed in the separate private
+  VoxSpark repository. Codex Mobile only owns bounded context extraction,
+  consent, relay validation, Composer authority, and action execution.
+- No 8789, Bridge, ChatGPT, or firmware restart was required for this closure.

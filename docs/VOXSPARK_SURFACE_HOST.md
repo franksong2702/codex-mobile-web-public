@@ -24,9 +24,18 @@ restricted to an exact credential-free loopback `ws://.../host` endpoint.
 
 A context or surface revision update from the same browser and Session preserves
 pending hardware commands and rebinds them to the new surface revision. A real
-browser or Session ownership change still discards pending commands. This keeps
-normal active-turn refreshes from racing the 500 ms browser relay poll and
-silently dropping a newly queued Send, Steer, or Queue command.
+browser or Session ownership change does not transfer those commands to the new
+target. This keeps normal active-turn refreshes from racing the 500 ms browser
+relay poll and silently dropping a newly queued Send, Steer, or Queue command.
+
+The persistent Host also keeps a bounded ownership record for the latest 32
+Bridge context revisions, with each record expiring after at most two target
+leases. This closes the reverse-direction race where the browser has already
+published a newer surface revision but Bridge sends an action using the prior
+revision still in flight. An action from the same Session is rebound to the
+latest surface revision. An action owned by another Session is never delivered
+to the newly selected Session; it remains scoped to its original Session until
+that Session returns. Unknown or expired revisions are still rejected.
 
 Composer replacement and Host action commands retain the originating bounded
 `capture_id`. Actions additionally carry a Bridge-issued unique `action_id`, while the
@@ -113,6 +122,9 @@ wins the backend arbitration.
 - Backend unit tests cover loopback-only URL validation, persistent Host socket
   ownership, context-revision translation, command delivery, lease expiry and
   recovery, plus the authenticated route boundary.
+- Context-race tests cover an action arriving on the immediately preceding
+  Bridge revision, same-Session rebinding, and non-delivery to a newly selected
+  Session.
 - Action-result tests cover browser success/failure reporting, no automatic
   retry, persistent replay, Bridge acknowledgement, and duplicate upload
   receipts. These are source-level tests and have not been deployed to M15.

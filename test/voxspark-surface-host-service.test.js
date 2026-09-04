@@ -251,6 +251,92 @@ test("same browser revision refresh preserves and rebinds a pending Steer comman
   service.stop();
 });
 
+test("a Host action in flight across a same-Session context revision advance is retained", () => {
+  FakeWebSocket.instances = [];
+  const service = createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  publish(service, {
+    surface_revision: 1,
+    context: context("session-a", true, 1000),
+  });
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+
+  publish(service, {
+    surface_revision: 2,
+    context: context("session-a", true, 1000),
+  });
+  socket.message({
+    type: "host.action",
+    action: "submit",
+    context_revision: 1,
+    draft_revision: 9,
+    capture_id: "capture-revision-race",
+    action_id: "capture-revision-race:9:submit",
+  });
+
+  const delivered = publish(service, {
+    surface_revision: 2,
+    context: context("session-a", true, 1000),
+  });
+  assert.equal(delivered.commands.length, 1);
+  assert.equal(delivered.commands[0].message.action_id, "capture-revision-race:9:submit");
+  assert.equal(delivered.commands[0].message.context_revision, 2);
+  service.stop();
+});
+
+test("an in-flight Host action never crosses into the newly selected Session", () => {
+  FakeWebSocket.instances = [];
+  const service = createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  publish(service, {
+    client_id: "browser-a",
+    surface_revision: 1,
+    context: context("session-a", true, 1000),
+  });
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+
+  publish(service, {
+    client_id: "browser-a",
+    surface_revision: 2,
+    context: context("session-b", true, 1000),
+  });
+  socket.message({
+    type: "host.action",
+    action: "submit",
+    context_revision: 1,
+    draft_revision: 9,
+    capture_id: "capture-session-a-race",
+    action_id: "capture-session-a-race:9:submit",
+  });
+
+  const wrongSession = publish(service, {
+    client_id: "browser-a",
+    surface_revision: 2,
+    context: context("session-b", true, 1000),
+  });
+  assert.deepEqual(wrongSession.commands, []);
+
+  const originalSession = publish(service, {
+    client_id: "browser-a",
+    surface_revision: 3,
+    context: context("session-a", true, 1000),
+  });
+  assert.equal(originalSession.commands.length, 1);
+  assert.equal(originalSession.commands[0].message.action_id, "capture-session-a-race:9:submit");
+  assert.equal(originalSession.commands[0].message.context_revision, 3);
+  service.stop();
+});
+
 test("Host action results are replayed until Bridge acknowledges them", () => {
   FakeWebSocket.instances = [];
   const service = createVoxSparkSurfaceHostService({

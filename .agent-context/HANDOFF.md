@@ -6815,3 +6815,19 @@ The previous full handoff was archived and should be opened only when old proven
 - This worktree commit remains local because the configured fork is not a
   private production backup target. Do not push it before physical acceptance
   and an explicit repository-visibility decision.
+
+## 2026-09-04 - VoxSpark In-Flight Context Revision Race Candidate
+
+- Physical action `a:dd2935f3-6ffc-4400-9c1b-767e0ea8d672:8` reached Bridge as
+  forwarded but received no browser Host result and timed out as unknown. The
+  adjacent metadata showed Bridge still on context revision 47 while Codex
+  Mobile advanced the same Session target to revision 48.
+- A deterministic service test reproduced the loss as `0 !== 1`: the browser
+  advanced its internal target before Bridge received the corresponding
+  `host.context`, then a Bridge action using the prior revision was discarded.
+- The candidate keeps at most 32 expiring context-owner records. Same-Session
+  in-flight actions rebind to the latest surface revision. Cross-Session actions
+  remain owned by their original Session and are not delivered to the newly
+  selected Session. Unknown or expired revisions remain rejected.
+- Focused Host runtime/service tests pass 43/43. This candidate is isolated and
+  not deployed; port 8789, Bridge 8790, ChatGPT, and BOX were not restarted.

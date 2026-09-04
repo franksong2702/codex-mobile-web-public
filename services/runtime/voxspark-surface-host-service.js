@@ -7,6 +7,7 @@ const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_RECONNECT_MS = 1_500;
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 const MAX_PENDING_COMMANDS = 16;
+const MAX_CONTEXT_OWNERS = 32;
 
 function boundedText(value, maxLength) {
   return String(value == null ? "" : value).trim().slice(0, maxLength);
@@ -106,6 +107,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
   let contextRevision = 0;
   let commandSequence = 0;
   let target = null;
+  let contextOwners = new Map();
   let pendingCommands = [];
   let pendingResults = [];
   let acceptedResultReceipts = [];
@@ -181,16 +183,23 @@ function createVoxSparkSurfaceHostService(options = {}) {
       return;
     }
     if (message.type !== "host.composer.replace" && message.type !== "host.action") return;
-    if (!target || message.context_revision !== target.contextRevision || target.expiresAt <= now()) return;
+    if (!target || target.expiresAt <= now()) return;
+    const messageOwner = contextOwners.get(message.context_revision);
+    if (!messageOwner || messageOwner.expiresAt <= now()) return;
+    const targetStillOwnsMessage = target.clientId === messageOwner.clientId
+      && target.context.session.id === messageOwner.sessionId;
+    const deliverySurfaceRevision = targetStillOwnsMessage
+      ? target.surfaceRevision
+      : messageOwner.surfaceRevision;
     commandSequence += 1;
     pendingCommands.push({
       sequence: commandSequence,
-      clientId: target.clientId,
-      sessionId: target.context.session.id,
-      surfaceRevision: target.surfaceRevision,
+      clientId: messageOwner.clientId,
+      sessionId: messageOwner.sessionId,
+      surfaceRevision: deliverySurfaceRevision,
       deliveredAt: 0,
       expiresAt: now() + (leaseMs * 2),
-      message: { ...message, context_revision: target.surfaceRevision },
+      message: { ...message, context_revision: deliverySurfaceRevision },
     });
     logCommand("queued", {
       sequence: commandSequence,
@@ -425,6 +434,15 @@ function createVoxSparkSurfaceHostService(options = {}) {
       fingerprint,
       expiresAt: now() + leaseMs,
     };
+    contextOwners.set(target.contextRevision, {
+      clientId: target.clientId,
+      sessionId: target.context.session.id,
+      surfaceRevision: target.surfaceRevision,
+      expiresAt: now() + (leaseMs * 2),
+    });
+    while (contextOwners.size > MAX_CONTEXT_OWNERS) {
+      contextOwners.delete(contextOwners.keys().next().value);
+    }
     scheduleLease();
     if (changed) sendTargetContext();
     const deliverable = context.composer.focused
@@ -482,6 +500,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
     if (socket && typeof socket.close === "function") socket.close(1000, "surface host stopped");
     socket = null;
     target = null;
+    contextOwners = new Map();
     pendingCommands = [];
     pendingResults = [];
     acceptedResultReceipts = [];

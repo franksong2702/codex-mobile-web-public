@@ -79,6 +79,7 @@ function createFixture(options = {}) {
   let activeTurnId = options.activeTurnId || "";
   let composer = String(options.composer || "");
   const sends = [];
+  const sendEvents = [];
   const backgroundSends = [];
   const interrupts = [];
   const diagnostics = [];
@@ -108,9 +109,11 @@ function createFixture(options = {}) {
     composerTargetActiveTurnId: () => activeTurnId,
     composerText: () => composer,
     setComposerText: (value) => { composer = String(value || ""); },
-    sendMessage: async () => {
+    sendMessage: async (event) => {
+      sendEvents.push(event || {});
       sends.push({ threadId, text: composer, activeTurnId });
       if (typeof options.sendBarrier === "function") await options.sendBarrier();
+      if (options.sendError) throw options.sendError;
       const sendSucceeds = typeof options.sendSucceeds === "function"
         ? options.sendSucceeds(sends.length)
         : options.sendSucceeds !== false;
@@ -143,6 +146,7 @@ function createFixture(options = {}) {
     runtime,
     socket,
     sends,
+    sendEvents,
     backgroundSends,
     interrupts,
     diagnostics,
@@ -292,6 +296,7 @@ test("final-only draft fills an empty focused Composer and idle Send submits onc
     text: "Implement the focused Session change.",
     activeTurnId: "",
   }]);
+  assert.equal(fixture.sendEvents[0].clientSubmissionId, "voxspark-capture-7:7:submit");
   assert.ok(fixture.diagnostics.some((item) => (
     item.code === "composer_replace_confirmed"
     && item.detail.captureId === "capture-7"
@@ -630,6 +635,61 @@ test("failed hardware Send reports failure without automatically sending twice",
     error_code: "action_failed",
   }]);
   assert.deepEqual(fixture.runtime.readState().pendingCommandResults, []);
+});
+
+test("recovered uncertain submission reports unknown without automatic retry", async () => {
+  const relayRequests = [];
+  const sendError = new Error("VoxSpark submission outcome is unknown after restart");
+  sendError.code = "voxspark_submission_outcome_unknown";
+  const fixture = createFixture({
+    sendError,
+    relay: async (payload) => {
+      relayRequests.push(payload);
+      return {
+        ok: true,
+        connected: true,
+        accepted_result_ids: payload.command_results.map((item) => item.action_id),
+        commands: payload.after_sequence === 0 ? [
+          {
+            sequence: 1,
+            message: message("host.composer.replace", {
+              context_revision: 1,
+              draft_revision: 311,
+              capture_id: "capture-uncertain",
+              text: "Do not blindly submit this twice.",
+            }),
+          },
+          {
+            sequence: 2,
+            message: message("host.action", {
+              action: "submit",
+              context_revision: 1,
+              draft_revision: 311,
+              capture_id: "capture-uncertain",
+              action_id: "capture-uncertain:311:submit",
+            }),
+          },
+        ] : [],
+      };
+    },
+  });
+
+  await nextTurn();
+  fixture.runtime.syncContext();
+  await nextTurn();
+
+  assert.equal(fixture.sends.length, 1);
+  assert.equal(fixture.composer, "Do not blindly submit this twice.");
+  const resultRequest = relayRequests.find((request) => request.command_results.length > 0);
+  assert.deepEqual(resultRequest.command_results, [{
+    action_id: "capture-uncertain:311:submit",
+    outcome: "unknown",
+    retryable: false,
+    error_code: "action_outcome_unknown",
+  }]);
+  fixture.runtime.syncContext();
+  await nextTurn();
+  assert.equal(fixture.sends.length, 1);
 });
 
 test("slow hardware Send does not block a Session switch context relay", async () => {
@@ -1011,6 +1071,10 @@ test("a Session switch preserves the original draft and routes its action back t
     mode: "steer",
     text: "Keep this guidance bound to Session A.",
   }]);
+  assert.equal(
+    fixture.backgroundSends[0].clientSubmissionId,
+    "voxspark-capture-session-action-race:13:steer",
+  );
   assert.equal(fixture.runtime.readState().retainedDrafts.length, 0);
 });
 

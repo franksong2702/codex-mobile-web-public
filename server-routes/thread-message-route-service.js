@@ -365,6 +365,7 @@ function createThreadMessageRouteService(dependencies = {}) {
       });
       const submissionKeyStartedAtMs = Date.now();
       const submissionKeys = messageSubmissionKeys(threadId, body, textForInput, uploads);
+      const durableVoxSparkSubmission = String(body.clientSubmissionId || "").startsWith("voxspark-");
       markSubmitTiming(timings, "submissionKeyMs", submissionKeyStartedAtMs);
       const requestedModel = await allowedRequestedModel(body.model);
       const requestedEffort = reasoningEffortOptions.includes(String(body.effort || "").trim())
@@ -638,10 +639,12 @@ function createThreadMessageRouteService(dependencies = {}) {
             };
             const steerPromise = startSteerRequest();
             const fastAcceptMs = Math.max(0, Number(activeTurnSteerFastAcceptMs) || 0);
-            const firstSteerOutcome = await Promise.race([
-              steerPromise,
-              resolveAfter(fastAcceptMs, { pending: true }),
-            ]);
+            const firstSteerOutcome = durableVoxSparkSubmission
+              ? await steerPromise
+              : await Promise.race([
+                  steerPromise,
+                  resolveAfter(fastAcceptMs, { pending: true }),
+                ]);
             if (firstSteerOutcome && firstSteerOutcome.pending) {
               timings.steerQueued = true;
               timings.steerFastAcceptMs = Math.max(0, Date.now() - routeStartedAtMs);
@@ -724,6 +727,20 @@ function createThreadMessageRouteService(dependencies = {}) {
         });
         if (isCodexAccountAuthError(err)) {
           timedSendJson(409, codexAccountAuthErrorPayload(err));
+          return { handled: true };
+        }
+        if (err && err.code === "voxspark_submission_outcome_unknown") {
+          timedSendJson(409, {
+            error: err.message || "VoxSpark submission outcome is unknown after restart",
+            code: "voxspark_submission_outcome_unknown",
+          });
+          return { handled: true };
+        }
+        if (err && err.code === "voxspark_submission_ledger_unavailable") {
+          timedSendJson(503, {
+            error: err.message || "VoxSpark submission ledger is unavailable",
+            code: "voxspark_submission_ledger_unavailable",
+          });
           return { handled: true };
         }
         throw err;

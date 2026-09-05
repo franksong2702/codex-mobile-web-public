@@ -13,6 +13,8 @@ const MAX_REFERENCE_MESSAGES = 6;
 const MAX_REFERENCE_BYTES = 12 * 1024;
 const MAX_COMPOSER_BYTES = 8 * 1024;
 const MAX_CORRECTION_RULES = 32;
+const MAX_TRANSACTION_RECEIPTS = 64;
+const TRANSACTION_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 const POLISH_CONTEXT_CONSENT = "bounded-context-v1";
 const SESSION_PROFILES = new Set(["general", "coding-agent", "journal", "product-discussion"]);
 const LANGUAGE_POLICIES = new Set(["auto", "zh-CN-mixed"]);
@@ -95,7 +97,7 @@ function commandTrace(message) {
 function normalizeCommandResult(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const actionId = traceId(value.action_id);
-  const outcome = value.outcome === "succeeded" || value.outcome === "failed" ? value.outcome : "";
+  const outcome = ["succeeded", "failed", "unknown"].includes(value.outcome) ? value.outcome : "";
   const errorCode = value.error_code == null ? "" : traceId(value.error_code);
   if (!actionId || !outcome || (boundedText(value.error_code, 96) && !errorCode)) return null;
   return {
@@ -103,6 +105,105 @@ function normalizeCommandResult(value) {
     outcome,
     retryable: value.retryable === true,
     error_code: errorCode,
+  };
+}
+
+function commandAppendId(message) {
+  const explicit = traceId(message && message.append_id);
+  if (explicit) return explicit;
+  const captureId = traceId(message && message.capture_id);
+  const contextRevision = Number(message && message.context_revision);
+  const draftRevision = Number(message && message.draft_revision);
+  if (!Number.isInteger(draftRevision) || draftRevision < 1) return "";
+  const owner = captureId || (Number.isInteger(contextRevision) && contextRevision > 0
+    ? `context-${contextRevision}` : "");
+  return owner ? traceId(`draft:${owner.slice(0, 64)}:${draftRevision}`) : "";
+}
+
+function persistentCommandMessage(message) {
+  const source = message && typeof message === "object" ? message : {};
+  if (source.type === "host.composer.replace") {
+    return {
+      type: "host.composer.replace",
+      contract: source.contract,
+      append_id: commandAppendId(source),
+      context_revision: source.context_revision,
+      draft_revision: source.draft_revision,
+      capture_id: source.capture_id,
+    };
+  }
+  return {
+    type: "host.action",
+    contract: source.contract,
+    action: source.action,
+    action_id: source.action_id,
+    context_revision: source.context_revision,
+    draft_revision: source.draft_revision,
+    capture_id: source.capture_id,
+    suggestion_id: source.suggestion_id,
+  };
+}
+
+function normalizeStoredLedger(value, nowMs) {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const cutoff = nowMs - TRANSACTION_RECEIPT_TTL_MS;
+  const pendingCommands = (Array.isArray(input.pendingCommands) ? input.pendingCommands : [])
+    .slice(-MAX_PENDING_COMMANDS)
+    .filter((item) => item && Number.isInteger(item.sequence) && item.sequence > 0
+      && traceId(item.clientId) && traceId(item.sessionId)
+      && Number.isFinite(item.expiresAt) && item.expiresAt > nowMs
+      && item.message && ["host.composer.replace", "host.action"].includes(item.message.type))
+    .map((item) => ({
+      sequence: item.sequence,
+      clientId: traceId(item.clientId),
+      sessionId: traceId(item.sessionId),
+      surfaceRevision: Number.isInteger(item.surfaceRevision) ? item.surfaceRevision : 0,
+      deliveredAt: Number.isFinite(item.deliveredAt) ? item.deliveredAt : 0,
+      expiresAt: item.expiresAt,
+      recoveryUncertain: item.recoveryUncertain === true,
+      message: { ...item.message },
+    }));
+  const pendingResults = (Array.isArray(input.pendingResults) ? input.pendingResults : [])
+    .map(normalizeCommandResult)
+    .filter(Boolean)
+    .slice(-MAX_PENDING_COMMANDS);
+  const commandAckReceipts = (Array.isArray(input.commandAckReceipts) ? input.commandAckReceipts : [])
+    .filter((item) => item && traceId(item.clientId) && Number.isInteger(item.sequence)
+      && item.sequence > 0 && Number(item.updatedAt || 0) >= cutoff)
+    .slice(-MAX_TRANSACTION_RECEIPTS)
+    .map((item) => ({ clientId: traceId(item.clientId), sequence: item.sequence, updatedAt: Number(item.updatedAt) }));
+  const appendReceipts = (Array.isArray(input.appendReceipts) ? input.appendReceipts : [])
+    .filter((item) => item && traceId(item.appendId) && traceId(item.sessionId)
+      && Number.isInteger(item.draftRevision) && item.draftRevision > 0
+      && Number(item.updatedAt || 0) >= cutoff)
+    .slice(-MAX_TRANSACTION_RECEIPTS)
+    .map((item) => ({
+      appendId: traceId(item.appendId),
+      sessionId: traceId(item.sessionId),
+      draftRevision: item.draftRevision,
+      phase: item.phase === "applied" ? "applied" : item.phase === "uncertain" ? "uncertain" : "queued",
+      updatedAt: Number(item.updatedAt),
+    }));
+  const actionReceipts = (Array.isArray(input.actionReceipts) ? input.actionReceipts : [])
+    .filter((item) => item && traceId(item.actionId) && traceId(item.clientId)
+      && traceId(item.sessionId) && Number(item.updatedAt || 0) >= cutoff)
+    .slice(-MAX_TRANSACTION_RECEIPTS)
+    .map((item) => ({
+      actionId: traceId(item.actionId),
+      clientId: traceId(item.clientId),
+      sessionId: traceId(item.sessionId),
+      phase: ["queued", "executing", "unknown", "succeeded", "failed"].includes(item.phase)
+        ? item.phase : "queued",
+      updatedAt: Number(item.updatedAt),
+    }));
+  const highestSequence = pendingCommands.reduce((highest, item) => Math.max(highest, item.sequence), 0);
+  return {
+    commandSequence: Math.max(Number.isInteger(input.commandSequence) ? input.commandSequence : 0, highestSequence),
+    pendingCommands,
+    pendingResults,
+    commandAckReceipts,
+    appendReceipts,
+    actionReceipts,
   };
 }
 
@@ -176,6 +277,12 @@ function createVoxSparkSurfaceHostService(options = {}) {
     ? POLISH_CONTEXT_CONSENT
     : "";
   const serviceEpoch = traceId(options.serviceEpoch) || crypto.randomUUID();
+  const transactionStore = options.transactionStore
+    && typeof options.transactionStore.load === "function"
+    && typeof options.transactionStore.save === "function"
+    ? options.transactionStore
+    : null;
+  const restoredLedger = normalizeStoredLedger(transactionStore ? transactionStore.load() : null, now());
 
   let bridgeUrl = "";
   let socket = null;
@@ -184,17 +291,119 @@ function createVoxSparkSurfaceHostService(options = {}) {
   let leaseTimer = null;
   let stopped = false;
   let contextRevision = 0;
-  let commandSequence = 0;
+  let commandSequence = restoredLedger.commandSequence;
   let target = null;
   let contextOwners = new Map();
-  let pendingCommands = [];
-  let pendingResults = [];
-  let acceptedResultReceipts = [];
+  let pendingCommands = restoredLedger.pendingCommands;
+  let pendingResults = restoredLedger.pendingResults;
+  let commandAckReceipts = restoredLedger.commandAckReceipts;
+  let appendReceipts = restoredLedger.appendReceipts;
+  let actionReceipts = restoredLedger.actionReceipts;
 
   function logCommand(event, details = {}) {
     if (!logger || typeof logger.info !== "function") return;
     logger.info(`[voxspark] surface command ${event}`, JSON.stringify(details));
   }
+
+  function persistTransactions() {
+    if (!transactionStore) return false;
+    const saved = transactionStore.save({
+      commandSequence,
+      pendingCommands: pendingCommands.map((item) => ({
+        ...item,
+        message: persistentCommandMessage(item.message),
+      })),
+      pendingResults,
+      commandAckReceipts,
+      appendReceipts,
+      actionReceipts,
+    });
+    if (!saved) logCommand("ledger_write_failed");
+    return saved;
+  }
+
+  function trimReceipts() {
+    const cutoff = now() - TRANSACTION_RECEIPT_TTL_MS;
+    commandAckReceipts = commandAckReceipts.filter((item) => item.updatedAt >= cutoff).slice(-MAX_TRANSACTION_RECEIPTS);
+    appendReceipts = appendReceipts.filter((item) => item.updatedAt >= cutoff).slice(-MAX_TRANSACTION_RECEIPTS);
+    actionReceipts = actionReceipts.filter((item) => item.updatedAt >= cutoff).slice(-MAX_TRANSACTION_RECEIPTS);
+  }
+
+  function rememberCommandAck(clientId, sequence) {
+    commandAckReceipts = commandAckReceipts.filter((item) => (
+      item.clientId !== clientId || item.sequence !== sequence
+    ));
+    commandAckReceipts.push({ clientId, sequence, updatedAt: now() });
+  }
+
+  function commandAckWasRecorded(clientId, sequence) {
+    return commandAckReceipts.some((item) => item.clientId === clientId && item.sequence === sequence);
+  }
+
+  function setAppendReceipt(appendId, sessionId, draftRevision, phase) {
+    if (!appendId) return;
+    appendReceipts = appendReceipts.filter((item) => item.appendId !== appendId);
+    appendReceipts.push({ appendId, sessionId, draftRevision, phase, updatedAt: now() });
+  }
+
+  function appendReceipt(appendId) {
+    return appendReceipts.find((item) => item.appendId === appendId) || null;
+  }
+
+  function setActionReceipt(actionId, clientId, sessionId, phase) {
+    if (!actionId) return;
+    actionReceipts = actionReceipts.filter((item) => item.actionId !== actionId);
+    actionReceipts.push({ actionId, clientId, sessionId, phase, updatedAt: now() });
+  }
+
+  function actionReceipt(actionId) {
+    return actionReceipts.find((item) => item.actionId === actionId) || null;
+  }
+
+  function setPendingResult(result) {
+    pendingResults = pendingResults.filter((item) => item.action_id !== result.action_id);
+    pendingResults.push(result);
+    if (pendingResults.length > MAX_PENDING_COMMANDS) pendingResults.shift();
+  }
+
+  function markRestoredTransactionsUncertain() {
+    let changed = false;
+    pendingCommands = pendingCommands.flatMap((item) => {
+      if (item.message.type === "host.composer.replace" && !item.deliveredAt) {
+        changed = true;
+        return [];
+      }
+      if (!item.deliveredAt || item.recoveryUncertain) return item;
+      changed = true;
+      const next = { ...item, recoveryUncertain: true };
+      if (item.message.type === "host.composer.replace") {
+        setAppendReceipt(commandAppendId(item.message), item.sessionId, item.message.draft_revision, "uncertain");
+      } else {
+        const actionId = traceId(item.message.action_id);
+        const receipt = actionReceipt(actionId);
+        if (!receipt || !["succeeded", "failed"].includes(receipt.phase)) {
+          setActionReceipt(actionId, item.clientId, item.sessionId, "unknown");
+          setPendingResult({ action_id: actionId, outcome: "unknown", retryable: false, error_code: "action_outcome_unknown" });
+        }
+      }
+      return [next];
+    });
+    for (const receipt of [...actionReceipts]) {
+      if (receipt.phase !== "executing") continue;
+      setActionReceipt(receipt.actionId, receipt.clientId, receipt.sessionId, "unknown");
+      setPendingResult({
+        action_id: receipt.actionId,
+        outcome: "unknown",
+        retryable: false,
+        error_code: "action_outcome_unknown",
+      });
+      changed = true;
+    }
+    trimReceipts();
+    if (transactionStore) persistTransactions();
+  }
+
+  markRestoredTransactionsUncertain();
 
   function socketIsOpen() {
     return Boolean(socket && WebSocketImpl && socket.readyState === WebSocketImpl.OPEN);
@@ -246,7 +455,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
   }
 
   function handleBridgeMessage(event) {
-    const message = parseBridgeMessage(event);
+    let message = parseBridgeMessage(event);
     if (!message || message.contract !== CONTRACT) return;
     if (message.type === "bridge.ready") {
       sendTargetContext();
@@ -258,7 +467,10 @@ function createVoxSparkSurfaceHostService(options = {}) {
       if (!actionId) return;
       const before = pendingResults.length;
       pendingResults = pendingResults.filter((item) => item.action_id !== actionId);
-      if (pendingResults.length !== before) logCommand("result_acknowledged", { action_id: actionId });
+      if (pendingResults.length !== before) {
+        logCommand("result_acknowledged", { action_id: actionId });
+        persistTransactions();
+      }
       return;
     }
     if (message.type !== "host.composer.replace" && message.type !== "host.action") return;
@@ -270,6 +482,31 @@ function createVoxSparkSurfaceHostService(options = {}) {
     const deliverySurfaceRevision = targetStillOwnsMessage
       ? target.surfaceRevision
       : messageOwner.surfaceRevision;
+    if (message.type === "host.composer.replace") {
+      const appendId = commandAppendId(message);
+      const receipt = appendReceipt(appendId);
+      const alreadyPending = pendingCommands.some((item) => (
+        item.message.type === "host.composer.replace" && commandAppendId(item.message) === appendId
+      ));
+      if (!appendId || receipt?.phase === "applied" || alreadyPending) {
+        logCommand("deduplicated", { type: message.type, append_id: appendId });
+        return;
+      }
+      if (traceId(message.append_id)) message = { ...message, append_id: appendId };
+      setAppendReceipt(appendId, messageOwner.sessionId, message.draft_revision, "queued");
+    } else {
+      const actionId = traceId(message.action_id);
+      const receipt = actionReceipt(actionId);
+      const alreadyPending = pendingCommands.some((item) => (
+        item.message.type === "host.action" && item.message.action_id === actionId
+      ));
+      if (actionId && (receipt || alreadyPending)) {
+        logCommand("deduplicated", { type: message.type, action_id: actionId, phase: receipt?.phase || "queued" });
+        sendPendingResults();
+        return;
+      }
+      if (actionId) setActionReceipt(actionId, messageOwner.clientId, messageOwner.sessionId, "queued");
+    }
     commandSequence += 1;
     pendingCommands.push({
       sequence: commandSequence,
@@ -290,6 +527,8 @@ function createVoxSparkSurfaceHostService(options = {}) {
     if (pendingCommands.length > MAX_PENDING_COMMANDS) {
       pendingCommands = pendingCommands.slice(-MAX_PENDING_COMMANDS);
     }
+    trimReceipts();
+    persistTransactions();
   }
 
   function connect() {
@@ -384,46 +623,82 @@ function createVoxSparkSurfaceHostService(options = {}) {
       : 0;
     const acknowledgementMatchesService = traceId(input.service_epoch) === serviceEpoch;
     const effectiveAfterSequence = acknowledgementMatchesService ? afterSequence : 0;
-    const acknowledgedSequences = acknowledgementMatchesService && Array.isArray(input.acknowledged_sequences)
+    const acknowledgedSequences = Array.isArray(input.acknowledged_sequences)
       ? [...new Set(input.acknowledged_sequences.slice(0, MAX_PENDING_COMMANDS)
         .filter((value) => Number.isInteger(value) && value > 0))]
       : null;
-    const acceptedCommandSequences = acknowledgedSequences || [];
+    const acceptedCommandSequences = [];
     const acceptedResultIds = [];
-    if (acknowledgementMatchesService && Array.isArray(input.command_results)) {
+    let ledgerChanged = false;
+    if (Array.isArray(input.command_results)) {
       for (const rawResult of input.command_results.slice(0, MAX_PENDING_COMMANDS)) {
         const result = normalizeCommandResult(rawResult);
         if (!result) continue;
-        if (acceptedResultReceipts.includes(result.action_id)) {
+        const receipt = actionReceipt(result.action_id);
+        if (!receipt || receipt.clientId !== clientId) continue;
+        if (["succeeded", "failed"].includes(receipt.phase)) {
           acceptedResultIds.push(result.action_id);
           continue;
         }
-        const command = pendingCommands.find((item) => (
-          item.clientId === clientId && item.message.type === "host.action" &&
-          item.message.action_id === result.action_id
-        ));
-        if (!command) continue;
-        if (!pendingResults.some((item) => item.action_id === result.action_id)) {
-          pendingResults.push(result);
-          if (pendingResults.length > MAX_PENDING_COMMANDS) pendingResults.shift();
-          send({ type: "host.action.result", ...result });
-          logCommand("result_queued", {
-            action_id: result.action_id,
-            outcome: result.outcome,
-            retryable: result.retryable,
-            error_code: result.error_code || null,
-          });
+        setPendingResult(result);
+        setActionReceipt(result.action_id, receipt.clientId, receipt.sessionId, result.outcome);
+        if (["succeeded", "failed"].includes(result.outcome)) {
+          const completedCommands = pendingCommands.filter((item) => (
+            item.message.type === "host.action" && item.message.action_id === result.action_id
+          ));
+          for (const item of completedCommands) rememberCommandAck(item.clientId, item.sequence);
+          pendingCommands = pendingCommands.filter((item) => (
+            item.message.type !== "host.action" || item.message.action_id !== result.action_id
+          ));
         }
-        acceptedResultReceipts.push(result.action_id);
-        if (acceptedResultReceipts.length > MAX_PENDING_COMMANDS * 4) {
-          acceptedResultReceipts = acceptedResultReceipts.slice(-(MAX_PENDING_COMMANDS * 4));
-        }
+        send({ type: "host.action.result", ...result });
+        logCommand("result_queued", {
+          action_id: result.action_id,
+          outcome: result.outcome,
+          retryable: result.retryable,
+          error_code: result.error_code || null,
+        });
         acceptedResultIds.push(result.action_id);
+        ledgerChanged = true;
+      }
+    }
+    if (context.composer.ownership === "voxspark" && context.composer.draft_revision > 0) {
+      const reconciled = pendingCommands.filter((item) => (
+        item.recoveryUncertain && item.message.type === "host.composer.replace"
+        && item.sessionId === context.session.id
+        && item.message.draft_revision === context.composer.draft_revision
+      ));
+      if (reconciled.length) {
+        for (const item of reconciled) {
+          rememberCommandAck(item.clientId, item.sequence);
+          setAppendReceipt(commandAppendId(item.message), item.sessionId, item.message.draft_revision, "applied");
+        }
+        const reconciledSequences = new Set(reconciled.map((item) => item.sequence));
+        pendingCommands = pendingCommands.filter((item) => !reconciledSequences.has(item.sequence));
+        ledgerChanged = true;
+        logCommand("append_reconciled", {
+          sequences: [...reconciledSequences],
+          draft_revision: context.composer.draft_revision,
+        });
       }
     }
     const pendingBeforeExpiry = pendingCommands.length;
+    const expiredCommands = pendingCommands.filter((item) => item.expiresAt <= now());
     pendingCommands = pendingCommands.filter((item) => item.expiresAt > now());
     if (pendingCommands.length !== pendingBeforeExpiry) {
+      for (const item of expiredCommands) {
+        if (item.message.type === "host.composer.replace") {
+          setAppendReceipt(commandAppendId(item.message), item.sessionId, item.message.draft_revision, "uncertain");
+        } else {
+          const actionId = traceId(item.message.action_id);
+          const receipt = actionReceipt(actionId);
+          if (receipt && !["succeeded", "failed"].includes(receipt.phase)) {
+            setActionReceipt(actionId, item.clientId, item.sessionId, "unknown");
+            setPendingResult({ action_id: actionId, outcome: "unknown", retryable: false, error_code: "action_outcome_unknown" });
+          }
+        }
+      }
+      ledgerChanged = true;
       logCommand("discarded", {
         count: pendingBeforeExpiry - pendingCommands.length,
         reason: "command_expired",
@@ -434,6 +709,11 @@ function createVoxSparkSurfaceHostService(options = {}) {
       const acknowledged = pendingCommands.filter((item) => (
         item.clientId === clientId && acknowledgedSet.has(item.sequence)
       ));
+      for (const sequence of acknowledgedSequences) {
+        if (acknowledged.some((item) => item.sequence === sequence) || commandAckWasRecorded(clientId, sequence)) {
+          acceptedCommandSequences.push(sequence);
+        }
+      }
       if (acknowledged.length) {
         logCommand("acknowledged", {
           sequences: acknowledged.map((item) => item.sequence),
@@ -441,9 +721,21 @@ function createVoxSparkSurfaceHostService(options = {}) {
           action_ids: acknowledged.map((item) => commandTrace(item.message).action_id).filter(Boolean),
         });
       }
+      for (const item of acknowledged) {
+        rememberCommandAck(clientId, item.sequence);
+        if (item.message.type === "host.composer.replace") {
+          setAppendReceipt(commandAppendId(item.message), item.sessionId, item.message.draft_revision, "applied");
+        } else {
+          const receipt = actionReceipt(item.message.action_id);
+          if (receipt && receipt.phase === "queued") {
+            setActionReceipt(receipt.actionId, receipt.clientId, receipt.sessionId, "executing");
+          }
+        }
+      }
       pendingCommands = pendingCommands.filter((item) => (
         item.clientId !== clientId || !acknowledgedSet.has(item.sequence)
       ));
+      if (acknowledged.length) ledgerChanged = true;
     } else if (effectiveAfterSequence > 0) {
       const acknowledged = pendingCommands.filter((item) => (
         item.clientId === clientId && item.sequence === effectiveAfterSequence
@@ -455,10 +747,19 @@ function createVoxSparkSurfaceHostService(options = {}) {
           action_ids: acknowledged.map((item) => commandTrace(item.message).action_id).filter(Boolean),
         });
       }
+      for (const item of acknowledged) {
+        rememberCommandAck(clientId, item.sequence);
+        if (item.message.type === "host.composer.replace") {
+          setAppendReceipt(commandAppendId(item.message), item.sessionId, item.message.draft_revision, "applied");
+        }
+      }
       pendingCommands = pendingCommands.filter((item) => (
         item.clientId !== clientId || item.sequence !== effectiveAfterSequence
       ));
+      if (acknowledged.length) ledgerChanged = true;
     }
+    trimReceipts();
+    if (ledgerChanged) persistTransactions();
     const targetIsLive = Boolean(target && target.expiresAt > now());
     const targetArmedAt = targetIsLive && target.context.composer.focused
       ? target.context.composer.armed_at
@@ -549,9 +850,24 @@ function createVoxSparkSurfaceHostService(options = {}) {
       ? pendingCommands.filter((item) => (
         item.clientId === clientId
         && item.sessionId === context.session.id
+        && item.recoveryUncertain !== true
       ))
       : [];
-    for (const item of deliverable) item.deliveredAt = item.deliveredAt || now();
+    let deliveryChanged = false;
+    for (const item of deliverable) {
+      if (!item.deliveredAt) {
+        item.deliveredAt = now();
+        deliveryChanged = true;
+      }
+      if (item.message.type === "host.action") {
+        const receipt = actionReceipt(item.message.action_id);
+        if (receipt && receipt.phase === "queued") {
+          setActionReceipt(receipt.actionId, receipt.clientId, receipt.sessionId, "executing");
+          deliveryChanged = true;
+        }
+      }
+    }
+    if (deliveryChanged) persistTransactions();
     const commands = deliverable.map((item) => ({ sequence: item.sequence, message: item.message }));
     if (commands.length) {
       logCommand("delivered", {
@@ -581,6 +897,11 @@ function createVoxSparkSurfaceHostService(options = {}) {
       context_revision: target ? target.contextRevision : 0,
       pending_commands: pendingCommands.length,
       pending_results: pendingResults.length,
+      uncertain_appends: appendReceipts.filter((item) => item.phase === "uncertain").length,
+      uncertain_actions: actionReceipts.filter((item) => item.phase === "unknown").length,
+      transaction_store: transactionStore && typeof transactionStore.status === "function"
+        ? transactionStore.status().lastWriteStatus || transactionStore.status().lastReadStatus || "enabled"
+        : "disabled",
     };
   }
 
@@ -604,7 +925,6 @@ function createVoxSparkSurfaceHostService(options = {}) {
     contextOwners = new Map();
     pendingCommands = [];
     pendingResults = [];
-    acceptedResultReceipts = [];
     if (logger && typeof logger.info === "function") logger.info("[voxspark] surface host stopped");
   }
 

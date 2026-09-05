@@ -757,6 +757,8 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   async function submitDraft(draft, mode, options = {}) {
     if (!currentContext) return COMMAND_RETRY;
     if (!text(draft && draft.text)) return COMMAND_DISCARD;
+    const actionId = traceId(options.actionId || draft.queuedActionId);
+    const clientSubmissionId = actionId ? `voxspark-${actionId}` : "";
     if (draft.sessionId !== currentContext.sessionId) {
       if (typeof sendDraft !== "function") return COMMAND_RETRY;
       await sendDraft({
@@ -765,6 +767,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         activeTurnId: draft.activeTurnId || "",
         text: draft.text,
         mode,
+        clientSubmissionId,
       });
       releaseDraft(draft);
       return COMMAND_ACCEPTED;
@@ -781,7 +784,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         return COMMAND_DISCARD;
       }
     }
-    await sendMessage({ preventDefault() {} });
+    await sendMessage({ preventDefault() {}, clientSubmissionId });
     if (text(composerText()) === draft.text) return COMMAND_RETRY;
     releaseDraft(draft);
     return COMMAND_ACCEPTED;
@@ -797,7 +800,10 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     const draft = queuedDrafts[draftIndex];
     queueFlushing = true;
     try {
-      const outcome = await submitDraft(draft, "submit", { restoreWhenEmpty: true });
+      const outcome = await submitDraft(draft, "submit", {
+        restoreWhenEmpty: true,
+        actionId: draft.queuedActionId,
+      });
       if (outcome === COMMAND_ACCEPTED) {
         queuedDrafts.splice(draftIndex, 1);
         queueTurnGate = "awaiting_running";
@@ -829,13 +835,14 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     if (action === "queue") {
       if (!text(composerTargetActiveTurnId())) return COMMAND_DISCARD;
       if (!text(draft.text)) return COMMAND_DISCARD;
+      draft.queuedActionId = traceId(message.action_id);
       queuedDrafts.push(draft);
       releaseDraft(matchedDraft);
       clearComposerIfOwned(draft);
       return COMMAND_ACCEPTED;
     }
     if (action === "submit" || action === "steer") {
-      return submitDraft(draft, action);
+      return submitDraft(draft, action, { actionId: traceId(message.action_id) });
     }
     return COMMAND_DISCARD;
   }
@@ -892,10 +899,11 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         }
         syncContext({ force: true });
         return actionId ? COMMAND_ACCEPTED : outcome;
-      } catch (_) {
+      } catch (err) {
+        const outcomeUnknown = Boolean(err && err.code === "voxspark_submission_outcome_unknown");
         diagnostic("host_action_failed", {
           action: text(message.action),
-          outcome: COMMAND_RETRY,
+          outcome: outcomeUnknown ? "unknown" : COMMAND_RETRY,
           ...traceDetails(message, metadata.sequence),
         });
         const actionId = traceId(message.action_id);
@@ -903,9 +911,9 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
           pendingCommandResults = pendingCommandResults.filter((item) => item.action_id !== actionId);
           pendingCommandResults.push({
             action_id: actionId,
-            outcome: "failed",
-            retryable: true,
-            error_code: "action_failed",
+            outcome: outcomeUnknown ? "unknown" : "failed",
+            retryable: !outcomeUnknown,
+            error_code: outcomeUnknown ? "action_outcome_unknown" : "action_failed",
           });
           return COMMAND_ACCEPTED;
         }

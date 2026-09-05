@@ -1888,7 +1888,10 @@ async function sendMessage(event) {
   const steering = Boolean(targetActiveTurnId && hasContent);
   const steerTurnId = steering ? String(targetActiveTurnId) : "";
   const submittedDraftKey = currentDraftKey();
-  const clientSubmissionId = createSubmissionId();
+  const requestedSubmissionId = String(event && event.clientSubmissionId || "").trim();
+  const clientSubmissionId = /^[A-Za-z0-9._:-]{1,128}$/.test(requestedSubmissionId)
+    ? requestedSubmissionId
+    : createSubmissionId();
   const submittedAttachments = state.pendingAttachments.slice();
   const previousThreadStatus = snapshotThreadStatus(targetThreadId);
   if (typeof recordSubmittedEchoDiagnosticLog === "function") {
@@ -2058,6 +2061,8 @@ async function sendMessage(event) {
         statusCode: diagnosticErrorStatus(err),
       });
     }
+    if (requestedSubmissionId.startsWith("voxspark-")
+      && err && err.code === "voxspark_submission_outcome_unknown") throw err;
   } finally {
     finishSendProgressWatchdog();
     state.composerBusy = false;
@@ -2082,7 +2087,10 @@ async function sendVoxSparkDraft(request = {}) {
   if (mode === "steer" && !targetActiveTurnId) throw new Error("voxspark_active_turn_missing");
 
   const body = new FormData();
-  const clientSubmissionId = createSubmissionId();
+  const requestedSubmissionId = String(request.clientSubmissionId || "").trim();
+  const clientSubmissionId = /^[A-Za-z0-9._:-]{1,128}$/.test(requestedSubmissionId)
+    ? requestedSubmissionId
+    : createSubmissionId();
   body.append("clientSubmissionId", clientSubmissionId);
   body.append("text", outboundText);
   if (request.thread && request.thread.cwd) body.append("cwd", request.thread.cwd);

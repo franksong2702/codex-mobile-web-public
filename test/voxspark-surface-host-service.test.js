@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { test } = require("node:test");
 const {
   CONTRACT,
@@ -8,6 +11,9 @@ const {
   normalizeContext,
   safeLoopbackBridgeUrl,
 } = require("../services/runtime/voxspark-surface-host-service");
+const {
+  createVoxSparkSurfaceTransactionStore,
+} = require("../services/runtime/voxspark-surface-transaction-store");
 const {
   createVoxSparkSurfaceHostRouteService,
 } = require("../server-routes/voxspark-surface-host-route-service");
@@ -72,6 +78,13 @@ function publish(service, overrides = {}) {
     context: context(),
     ...overrides,
   });
+}
+
+function transactionStoreFixture(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "voxspark-service-ledger-"));
+  const filePath = path.join(directory, "surface-transactions.json");
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  return () => createVoxSparkSurfaceTransactionStore({ filePath });
 }
 
 test("VoxSpark backend accepts only exact loopback Host URLs", () => {
@@ -572,6 +585,252 @@ test("explicit command acknowledgements do not consume another Session's command
   });
   assert.deepEqual(restoredA.commands.map((item) => item.sequence), [1]);
   service.stop();
+});
+
+test("an applied Composer append is not replayed after the Host service restarts", (t) => {
+  FakeWebSocket.instances = [];
+  const createStore = transactionStoreFixture(t);
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: createStore(),
+    now: () => 1000,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const firstService = createService();
+  const firstContext = publish(firstService);
+  const firstSocket = FakeWebSocket.instances.at(-1);
+  firstSocket.open();
+  firstSocket.message({
+    type: "host.composer.replace",
+    append_id: "append-restart-applied",
+    context_revision: 1,
+    draft_revision: 41,
+    capture_id: "capture-restart-applied",
+    text: "Append this once.",
+  });
+  const delivered = publish(firstService);
+  assert.deepEqual(delivered.commands.map((item) => item.sequence), [1]);
+  assert.deepEqual(publish(firstService, {
+    service_epoch: firstContext.service_epoch,
+    acknowledged_sequences: [1],
+  }).accepted_command_sequences, [1]);
+  firstService.stop();
+
+  const secondService = createService();
+  publish(secondService);
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  secondSocket.open();
+  secondSocket.message({
+    type: "host.composer.replace",
+    append_id: "append-restart-applied",
+    context_revision: 1,
+    draft_revision: 41,
+    capture_id: "capture-restart-applied",
+    text: "Append this once.",
+  });
+  assert.deepEqual(publish(secondService).commands, []);
+  assert.equal(secondService.status().pending_commands, 0);
+  secondService.stop();
+});
+
+test("an undelivered Composer append keeps text off disk and accepts Bridge replay after restart", (t) => {
+  FakeWebSocket.instances = [];
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "voxspark-private-ledger-"));
+  const filePath = path.join(directory, "surface-transactions.json");
+  const privateText = "Private final transcript must stay in memory.";
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: createVoxSparkSurfaceTransactionStore({ filePath }),
+    now: () => 1500,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+
+  const firstService = createService();
+  publish(firstService);
+  const firstSocket = FakeWebSocket.instances.at(-1);
+  firstSocket.open();
+  firstSocket.message({
+    type: "host.composer.replace",
+    append_id: "append-private-replay",
+    context_revision: 1,
+    draft_revision: 45,
+    capture_id: "capture-private-replay",
+    text: privateText,
+  });
+  const persisted = fs.readFileSync(filePath, "utf8");
+  assert.equal(persisted.includes(privateText), false);
+  assert.equal(persisted.includes("append-private-replay"), true);
+  firstService.stop();
+
+  const secondService = createService();
+  assert.deepEqual(publish(secondService).commands, []);
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  secondSocket.open();
+  secondSocket.message({
+    type: "host.composer.replace",
+    append_id: "append-private-replay",
+    context_revision: 1,
+    draft_revision: 45,
+    capture_id: "capture-private-replay",
+    text: privateText,
+  });
+  const replayed = publish(secondService);
+  assert.equal(replayed.commands.length, 1);
+  assert.equal(replayed.commands[0].message.text, privateText);
+  secondService.stop();
+});
+
+test("an uncertain Composer append reconciles from exact Host ownership after restart", (t) => {
+  FakeWebSocket.instances = [];
+  const createStore = transactionStoreFixture(t);
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: createStore(),
+    now: () => 2000,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const firstService = createService();
+  publish(firstService);
+  const firstSocket = FakeWebSocket.instances.at(-1);
+  firstSocket.open();
+  firstSocket.message({
+    type: "host.composer.replace",
+    append_id: "append-restart-uncertain",
+    context_revision: 1,
+    draft_revision: 42,
+    capture_id: "capture-restart-uncertain",
+    text: "Reconcile this append.",
+  });
+  assert.deepEqual(publish(firstService).commands.map((item) => item.sequence), [1]);
+  firstService.stop();
+
+  const secondService = createService();
+  const recoveredContext = context();
+  recoveredContext.composer.ownership = "voxspark";
+  recoveredContext.composer.draft_revision = 42;
+  assert.deepEqual(publish(secondService, { context: recoveredContext }).commands, []);
+  assert.equal(secondService.status().pending_commands, 0);
+  assert.equal(secondService.status().uncertain_appends, 0);
+  secondService.stop();
+});
+
+test("a delivered action becomes unknown after restart and a late success converges without replay", (t) => {
+  FakeWebSocket.instances = [];
+  const createStore = transactionStoreFixture(t);
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: createStore(),
+    now: () => 3000,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const firstService = createService();
+  publish(firstService);
+  const firstSocket = FakeWebSocket.instances.at(-1);
+  firstSocket.open();
+  firstSocket.message({
+    type: "host.action",
+    action: "submit",
+    action_id: "action-restart-uncertain",
+    context_revision: 1,
+    draft_revision: 43,
+    capture_id: "capture-restart-uncertain",
+  });
+  assert.deepEqual(publish(firstService).commands.map((item) => item.sequence), [1]);
+  firstService.stop();
+
+  const secondService = createService();
+  const recovered = publish(secondService);
+  assert.deepEqual(recovered.commands, []);
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  secondSocket.open();
+  assert.ok(secondSocket.sent.some((item) => (
+    item.type === "host.action.result" && item.action_id === "action-restart-uncertain"
+      && item.outcome === "unknown"
+  )));
+  const late = publish(secondService, {
+    service_epoch: recovered.service_epoch,
+    command_results: [{
+      action_id: "action-restart-uncertain",
+      outcome: "succeeded",
+      retryable: false,
+      error_code: "",
+    }],
+  });
+  assert.deepEqual(late.accepted_result_ids, ["action-restart-uncertain"]);
+  assert.ok(secondSocket.sent.some((item) => (
+    item.type === "host.action.result" && item.action_id === "action-restart-uncertain"
+      && item.outcome === "succeeded"
+  )));
+  secondSocket.message({ type: "bridge.action.ack", action_id: "action-restart-uncertain" });
+  secondService.stop();
+
+  const thirdService = createService();
+  publish(thirdService);
+  const thirdSocket = FakeWebSocket.instances.at(-1);
+  thirdSocket.open();
+  thirdSocket.message({
+    type: "host.action",
+    action: "submit",
+    action_id: "action-restart-uncertain",
+    context_revision: 1,
+    draft_revision: 43,
+    capture_id: "capture-restart-uncertain",
+  });
+  assert.deepEqual(publish(thirdService).commands, []);
+  assert.equal(thirdService.status().pending_commands, 0);
+  thirdService.stop();
+});
+
+test("an acknowledged action without a result becomes unknown after restart", (t) => {
+  FakeWebSocket.instances = [];
+  const createStore = transactionStoreFixture(t);
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: createStore(),
+    now: () => 3100,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const firstService = createService();
+  const firstContext = publish(firstService);
+  const firstSocket = FakeWebSocket.instances.at(-1);
+  firstSocket.open();
+  firstSocket.message({
+    type: "host.action",
+    action: "submit",
+    action_id: "action-acked-before-result",
+    context_revision: 1,
+    draft_revision: 44,
+    capture_id: "capture-acked-before-result",
+  });
+  assert.deepEqual(publish(firstService).commands.map((item) => item.sequence), [1]);
+  assert.deepEqual(publish(firstService, {
+    service_epoch: firstContext.service_epoch,
+    acknowledged_sequences: [1],
+  }).accepted_command_sequences, [1]);
+  assert.equal(firstService.status().pending_commands, 0);
+  firstService.stop();
+
+  const secondService = createService();
+  publish(secondService);
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  secondSocket.open();
+  assert.ok(secondSocket.sent.some((item) => (
+    item.type === "host.action.result" && item.action_id === "action-acked-before-result"
+      && item.outcome === "unknown"
+  )));
+  assert.equal(secondService.status().uncertain_actions, 1);
+  secondService.stop();
 });
 
 test("authorized route exposes bounded context publish and status", async () => {

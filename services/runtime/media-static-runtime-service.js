@@ -31,6 +31,7 @@ function createMediaStaticRuntimeService(dependencies = {}) {
     readStateDbThread: (...args) => dependencies.readStateDbThread(...args),
     readStartedThread: (...args) => dependencies.readStartedThread(...args),
     rolloutPathForThread: dependencies.rolloutPathForThread,
+    messageSubmissionStore: dependencies.messageSubmissionStore,
   });
 
   const IMAGE_EXTENSIONS = mediaFileService.imageExtensions;

@@ -278,3 +278,41 @@ wins the backend arbitration.
   classic build base `codex-mobile-shell-v625-38eb4eac006d`.
 - Not deployed or pushed. Listener 8789, Bridge 8790, ChatGPT, and BOX were not
   restarted. Full browser and physical BOX acceptance remain open.
+
+## 2026-09-05 Checkpoint R2 persistent transaction ledger candidate
+
+- The Mobile backend is the transaction authority for Host command delivery,
+  Composer append receipts, and BOX action receipts. Its bounded state is
+  atomically stored with mode `0600` under the runtime `voxspark` directory.
+- Persisted Surface commands keep only transaction ids, Session ownership, and
+  revisions. Final transcript and Composer text stay in memory; an undelivered
+  append is recovered from Bridge replay of the same `append_id`.
+- `surface-transactions.json` preserves exact acknowledgements and receipts.
+  Confirmed appends do not replay after restart. A delivered-but-unconfirmed
+  append becomes uncertain and waits for exact Host ownership plus
+  `draft_revision`; it is not blindly appended again.
+- BOX `action_id` maps to a stable `voxspark-*` `clientSubmissionId`.
+  `submission-transactions.json` writes that id before the Codex message
+  boundary. Completed work deduplicates after restart; restored in-flight work
+  becomes `unknown` and is not executed again.
+- Ledger write failure returns `voxspark_submission_ledger_unavailable` before
+  Codex is called. Restored uncertainty returns
+  `voxspark_submission_outcome_unknown` and reaches Bridge as non-retryable
+  `unknown`.
+- The submission ledger keeps bounded metadata and minimal turn ids, not
+  transcripts, Composer text, prompts, credentials, or Codex response bodies.
+- Verification: full suite `2692/2692`; focused transaction tests `28/28`,
+  browser Host tests `34/34`, frontend build/manifest, syntax, and diff checks
+  pass.
+- This does not claim strict downstream exactly-once execution. Without a
+  durable Codex query receipt, the remote-acceptance/local-crash window stays
+  `unknown` and requires reconciliation instead of automatic replay.
+- VoxSpark Steer waits for a terminal Codex route result instead of using the
+  normal browser fast-accept background path. Browser-local Queue payloads are
+  not yet durable across browser restart; Queue backend ownership remains the
+  next reliability gap.
+- If Bridge and Mobile both crash before Composer confirmation, an in-memory
+  final draft is not recoverable. Cross-process draft recovery would require a
+  separately reviewed encrypted short-lived spool, not plaintext ledger data.
+- Not deployed or pushed. Listener 8789, Bridge 8790, ChatGPT, and BOX were not
+  restarted. Browser and physical BOX restart acceptance remain open.

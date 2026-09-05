@@ -6879,3 +6879,30 @@ The previous full handoff was archived and should be opened only when old proven
   classic build base `codex-mobile-shell-v625-38eb4eac006d`.
 - Not deployed or pushed. Listener 8789, Bridge 8790, ChatGPT, and BOX were not
   restarted. Browser and physical BOX acceptance remain open.
+
+## 2026-09-05 - VoxSpark Checkpoint R2 persistent transaction ledger candidate
+
+- Continue from isolated branch `voxspark/r1-transaction-integrity`; do not
+  transplant into the dirty maintenance checkout until separately approved.
+- The Surface store owns exact pending commands, acknowledgements, Composer
+  append receipts, and action results. Confirmed appends do not replay after
+  restart; uncertain appends wait for exact ownership and draft revision.
+- Persisted Surface commands contain ids and revisions but no transcript or
+  Composer text. Undelivered appends rely on Bridge replay of the same id.
+- A second write-ahead store protects the Codex submission boundary. Stable BOX
+  `action_id` values become stable `voxspark-*` `clientSubmissionId` values.
+  Success deduplicates after restart; restored in-flight work becomes `unknown`.
+- Ledger failure occurs before Codex execution. HTTP, browser Host, Mobile
+  backend, and Bridge preserve retryable failure versus non-retryable unknown.
+- Verification: full Codex Mobile `2692/2692`; focused transaction `28/28`;
+  browser Host `34/34`; paired VoxSpark Node `148/148`, Python `6/6`.
+  Frontend build/manifest, syntax, project, and diff checks pass.
+- No listener, Bridge, ChatGPT, or BOX restart, deployment, flash, or push.
+- Without a queryable Codex receipt, preserve the crash-window `unknown`; never
+  replace it with blind automatic replay.
+- VoxSpark Steer bypasses the generic fast-accept background path so success is
+  persisted only after a terminal route result. Queue payload persistence is
+  still browser-local and remains an explicit follow-up.
+- A simultaneous Bridge and Mobile crash before Composer confirmation cannot
+  recover the in-memory final text. Do not add plaintext recovery storage;
+  evaluate an encrypted short-TTL spool as a separate security decision.

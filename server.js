@@ -112,6 +112,7 @@ const { createServerRuntimeConfigService } = require("./services/runtime/server-
 const { createServerHttpRuntimeService } = require("./services/runtime/server-http-runtime-service");
 const { createServerRestartDrainService } = require("./services/runtime/server-restart-drain-service");
 const { createVoxSparkSurfaceHostService } = require("./services/runtime/voxspark-surface-host-service");
+const { createVoxSparkSurfaceTransactionStore } = require("./services/runtime/voxspark-surface-transaction-store");
 const { createRuntimeSettingsService } = require("./services/runtime/runtime-settings-service");
 const { createThreadRuntimeSettingsService } = require("./services/runtime/thread-runtime-settings-service");
 const { createModelOptionsRuntimeService } = require("./services/runtime/model-options-runtime-service");
@@ -749,6 +750,9 @@ const {
 } = threadVisibilityService;
 const runtimePressureDiagnostics = createRuntimePressureDiagnosticsService();
 runtimePressureDiagnostics.enable();
+const voxsparkSubmissionTransactionStore = createVoxSparkSurfaceTransactionStore({
+  filePath: path.join(RUNTIME_ROOT, "voxspark", "submission-transactions.json"),
+});
 const mediaStaticRuntimeService = createMediaStaticRuntimeService({
   env: process.env,
   path,
@@ -768,6 +772,7 @@ const mediaStaticRuntimeService = createMediaStaticRuntimeService({
   getUrl,
   frameAncestorsHeader: () => hermesPluginService.frameAncestorsHeader(),
   sendJson,
+  messageSubmissionStore: voxsparkSubmissionTransactionStore,
 });
 const {
   mediaFileService,
@@ -1900,6 +1905,9 @@ const chatGptProRuntimeService = createChatGptProRuntimeService({
 const voxsparkSurfaceHostService = createVoxSparkSurfaceHostService({
   defaultBridgeUrl: VOXSPARK_BRIDGE_URL,
   polishContextConsent: VOXSPARK_POLISH_CONTEXT_CONSENT,
+  transactionStore: createVoxSparkSurfaceTransactionStore({
+    filePath: path.join(RUNTIME_ROOT, "voxspark", "surface-transactions.json"),
+  }),
   logger: console,
 });
 const {

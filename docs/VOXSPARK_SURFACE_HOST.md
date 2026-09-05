@@ -73,7 +73,9 @@ input or the existing bounded `local_context.terms` path.
 ## Actions
 
 - `host.composer.replace` writes one finalized draft into the currently focused
-  Composer. Interim transcripts are not accepted by this adapter.
+  Composer. Interim transcripts are not accepted by this adapter. The next
+  Host context reports exact `composer.ownership` and `composer.draft_revision`
+  as the Bridge-visible application receipt.
 - `submit` reuses Codex Mobile `sendMessage` only when the Session is idle.
 - `steer` reuses `sendMessage` only while the selected Session has an active
   turn, preserving the existing Codex steering path.
@@ -94,16 +96,20 @@ hardware actions and tells BOX to hand control back to the computer.
 Within the same Session, the currently visible non-empty Composer is the
 authoritative text for BOX Send, Steer, and Queue. Keyboard edits made after a
 voice draft arrives are retained rather than rejected as a changed Composer.
+If the user clears the Composer, the empty value is authoritative and Queue is
+rejected instead of resurrecting the older in-memory voice draft.
 The original capture id, draft revision, Session ownership, approval, and turn
 state gates still apply. Once an action is forwarded, BOX leaves draft actions
-for processing; Host success clears the matching draft, while explicit failure
-or unknown restores it for recovery.
+for processing. Host success clears the matching draft, explicit failure
+restores its controls, and `unknown` retains the draft but blocks blind replay
+until a terminal result or later reconciliation.
 
-Host actions execute asynchronously from context publication but remain
-strictly ordered. While a slow Send is running, navigation immediately
-publishes the newly selected Session. The browser does not advance the command
-read cursor until the action result exists, so the persistent backend can
-accept and replay that result before removing the command.
+Host actions execute asynchronously from context publication. While a slow
+Send is running, navigation immediately publishes the newly selected Session.
+The browser explicitly acknowledges each processed command sequence instead of
+advancing one global read cursor, so acknowledging Session B cannot remove a
+pending Session A command. The persistent backend separately accepts and
+replays action results until Bridge acknowledges each `action_id`.
 
 After a successful Send, Codex Mobile normally blurs the Composer. The adapter
 keeps the selected Composer target armed without restoring DOM focus or opening
@@ -250,3 +256,25 @@ wins the backend arbitration.
   VoxSpark repository. Codex Mobile only owns bounded context extraction,
   consent, relay validation, Composer authority, and action execution.
 - No 8789, Bridge, ChatGPT, or firmware restart was required for this closure.
+
+## 2026-09-05 Checkpoint R1 transaction integrity candidate
+
+- Branch `voxspark/r1-transaction-integrity` is isolated from the dirty
+  maintenance checkout and starts at public integration commit
+  `711fe5ee9351f94ebb166a2e61e0fe65e8a26237`.
+- Surface Host now sends `acknowledged_sequences` and the backend removes only
+  those exact commands. The legacy `after_sequence` compatibility path also
+  confirms only the exact sequence rather than a cross-Session high-water
+  range.
+- Clearing a VoxSpark-owned Composer updates the retained draft to empty.
+  Send, Steer, and Queue reject that empty draft and report a bounded failed
+  action result instead of executing stale text.
+- This candidate pairs with VoxSpark's Composer-application receipt and late
+  action-result convergence changes. Focused Host runtime/service tests pass
+  49/49 and the full suite passes 2678/2678 after rebuilding the frontend
+  artifact. Relevant `node --check` commands and `git diff --check` pass.
+- Published local candidate coordinate is
+  `0.1.11|codex-mobile-shell-v625-b64ee806f629`; its Vite readback records
+  classic build base `codex-mobile-shell-v625-38eb4eac006d`.
+- Not deployed or pushed. Listener 8789, Bridge 8790, ChatGPT, and BOX were not
+  restarted. Full browser and physical BOX acceptance remain open.

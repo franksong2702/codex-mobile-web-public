@@ -503,6 +503,77 @@ test("switching to another Session preserves commands for the original Session",
   service.stop();
 });
 
+test("explicit command acknowledgements do not consume another Session's command", () => {
+  FakeWebSocket.instances = [];
+  const service = createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    serviceEpoch: "service-explicit-ack",
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const first = publish(service, {
+    surface_revision: 1,
+    context: context("session-a", true, 1000),
+  });
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  socket.message({
+    type: "host.composer.replace",
+    context_revision: 1,
+    draft_revision: 10,
+    capture_id: "capture-session-a",
+    text: "Keep Session A pending.",
+  });
+
+  const sessionB = context("session-b", true, 2000);
+  assert.deepEqual(publish(service, {
+    surface_revision: 2,
+    context: sessionB,
+  }).commands, []);
+  socket.message({
+    type: "host.action",
+    action: "stop",
+    context_revision: 2,
+    action_id: "action-session-b",
+  });
+  const deliveredB = publish(service, {
+    surface_revision: 2,
+    service_epoch: first.service_epoch,
+    acknowledged_sequences: [],
+    context: sessionB,
+  });
+  assert.deepEqual(deliveredB.commands.map((item) => item.sequence), [2]);
+
+  const acknowledgedB = publish(service, {
+    surface_revision: 2,
+    service_epoch: first.service_epoch,
+    after_sequence: 2,
+    acknowledged_sequences: [2],
+    context: sessionB,
+  });
+  assert.deepEqual(acknowledgedB.accepted_command_sequences, [2]);
+
+  const replayedAcknowledgement = publish(service, {
+    surface_revision: 2,
+    service_epoch: first.service_epoch,
+    acknowledged_sequences: [2],
+    context: sessionB,
+  });
+  assert.deepEqual(replayedAcknowledgement.accepted_command_sequences, [2]);
+  assert.deepEqual(replayedAcknowledgement.commands, []);
+
+  const restoredA = publish(service, {
+    surface_revision: 3,
+    service_epoch: first.service_epoch,
+    after_sequence: 2,
+    acknowledged_sequences: [],
+    context: context("session-a", true, 3000),
+  });
+  assert.deepEqual(restoredA.commands.map((item) => item.sequence), [1]);
+  service.stop();
+});
+
 test("authorized route exposes bounded context publish and status", async () => {
   const calls = [];
   const route = createVoxSparkSurfaceHostRouteService({

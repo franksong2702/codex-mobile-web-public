@@ -609,7 +609,8 @@ test("failed hardware Send reports failure without automatically sending twice",
   fixture.runtime.syncContext();
   await nextTurn();
 
-  assert.equal(relayRequests.at(-1).after_sequence, 2);
+  assert.equal(relayRequests.at(-1).after_sequence, 0);
+  assert.deepEqual(relayRequests.at(-1).acknowledged_sequences, [1, 2]);
   assert.equal(fixture.sends.length, 1);
   assert.equal(fixture.composer, "Keep this draft until Send succeeds.");
   assert.ok(fixture.diagnostics.some((item) => (
@@ -619,7 +620,8 @@ test("failed hardware Send reports failure without automatically sending twice",
   )));
   fixture.runtime.syncContext();
   await nextTurn();
-  assert.equal(relayRequests.at(-1).after_sequence, 2);
+  assert.equal(relayRequests.at(-1).after_sequence, 0);
+  assert.deepEqual(relayRequests.at(-1).acknowledged_sequences, [1, 2]);
   const resultRequest = relayRequests.find((request) => request.command_results.length > 0);
   assert.deepEqual(resultRequest.command_results, [{
     action_id: "capture-31:31:submit",
@@ -672,7 +674,8 @@ test("slow hardware Send does not block a Session switch context relay", async (
   fixture.switchSessionFromNavigation("session-b");
   await nextTurn();
   assert.equal(relayRequests.at(-1).context.session.id, "session-b");
-  assert.equal(relayRequests.at(-1).after_sequence, 1);
+  assert.equal(relayRequests.at(-1).after_sequence, 0);
+  assert.deepEqual(relayRequests.at(-1).acknowledged_sequences, [1]);
   assert.deepEqual(relayRequests.at(-1).command_results, []);
   assert.equal(fixture.sends.length, 1);
 
@@ -682,8 +685,10 @@ test("slow hardware Send does not block a Session switch context relay", async (
   const resultRequestIndex = relayRequests.findIndex((request) => request.command_results.some((result) => (
     result.action_id === "capture-32:32:submit" && result.outcome === "succeeded"
   )));
-  assert.equal(relayRequests[resultRequestIndex].after_sequence, 1);
-  assert.ok(relayRequests.slice(resultRequestIndex + 1).some((request) => request.after_sequence === 2));
+  assert.equal(relayRequests[resultRequestIndex].after_sequence, 0);
+  assert.ok(relayRequests.slice(resultRequestIndex + 1).some((request) => (
+    request.acknowledged_sequences.includes(2)
+  )));
 });
 
 test("selected Composer target stays armed across blur and conversation navigation", async () => {
@@ -1032,4 +1037,33 @@ test("queueing a retained Session A draft never clears Session B Composer text",
   assert.equal(fixture.composer, "Shared visible text.");
   assert.equal(fixture.runtime.readState().queuedDrafts.length, 1);
   assert.equal(fixture.runtime.readState().queuedDrafts[0].sessionId, "session-a");
+});
+
+test("clearing the Composer before Queue rejects the stale voice draft", async () => {
+  const fixture = createFixture({ activeTurnId: "turn-a" });
+  const revision = fixture.runtime.readState().contextRevision;
+  fixture.socket.message(message("host.composer.replace", {
+    context_revision: revision,
+    draft_revision: 15,
+    capture_id: "capture-cleared-before-queue",
+    text: "Do not queue this after it is cleared.",
+  }));
+  fixture.composer = "";
+
+  const outcome = await fixture.runtime.handleMessage(message("host.action", {
+    action: "queue",
+    context_revision: revision,
+    draft_revision: 15,
+    capture_id: "capture-cleared-before-queue",
+    action_id: "capture-cleared-before-queue:15:queue",
+  }), { sequence: 94 });
+
+  assert.equal(outcome, "accepted");
+  assert.equal(fixture.runtime.readState().queuedDrafts.length, 0);
+  assert.deepEqual(fixture.runtime.readState().pendingCommandResults, [{
+    action_id: "capture-cleared-before-queue:15:queue",
+    outcome: "failed",
+    retryable: false,
+    error_code: "action_rejected",
+  }]);
 });

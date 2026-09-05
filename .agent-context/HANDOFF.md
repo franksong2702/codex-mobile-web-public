@@ -6857,3 +6857,25 @@ The previous full handoff was archived and should be opened only when old proven
 - Privacy: no transcript, Composer body, token, cookie, access key, or raw
   Session body is stored in this handoff. Rich polish context remains bounded
   and explicitly gated.
+
+## 2026-09-05 - VoxSpark Checkpoint R1 transaction integrity candidate
+
+- Isolated worktree branch: `voxspark/r1-transaction-integrity`, based on
+  `711fe5ee9351f94ebb166a2e61e0fe65e8a26237`. The original dirty maintenance
+  checkout was not edited.
+- The Surface Host replaces the global cumulative command cursor with exact
+  `acknowledged_sequences`. The persistent service removes only explicitly
+  acknowledged command sequences; Session B can no longer consume an older
+  pending Session A command.
+- Clearing the Composer is authoritative. Queue, Send, and Steer reject an
+  empty draft and report a bounded failed result instead of reviving stale
+  voice text.
+- This pairs with VoxSpark Bridge changes that wait for exact Composer ownership
+  and draft revision before exposing draft actions, and that converge a delayed
+  terminal result after `unknown` without blind resubmission.
+- Verification: focused Surface Host runtime/service tests 49/49; full suite
+  2678/2678; relevant syntax and diff checks pass. The published local candidate
+  is `0.1.11|codex-mobile-shell-v625-b64ee806f629`; its Vite readback records
+  classic build base `codex-mobile-shell-v625-38eb4eac006d`.
+- Not deployed or pushed. Listener 8789, Bridge 8790, ChatGPT, and BOX were not
+  restarted. Browser and physical BOX acceptance remain open.

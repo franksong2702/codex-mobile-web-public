@@ -15,6 +15,7 @@ const POLISH_CONTEXT_BYTE_LIMIT = 12 * 1024;
 const POLISH_COMPOSER_BYTE_LIMIT = 8 * 1024;
 const CORRECTION_RULE_LIMIT = 32;
 const CORRECTION_OCCURRENCES_REQUIRED = 2;
+const COMMAND_ACKNOWLEDGEMENT_LIMIT = 64;
 const COMMON_ENGLISH_WORDS = new Set([
   "about", "after", "again", "also", "and", "are", "because", "before", "but",
   "can", "could", "earlier", "for", "from", "have", "into", "just", "more",
@@ -332,7 +333,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   let relayInFlight = false;
   let relayAgain = false;
   let relayServiceEpoch = "";
-  let lastCommandSequence = 0;
+  const pendingCommandAcknowledgements = new Set();
   const inFlightCommandSequences = new Set();
   let pendingCommandResults = [];
   let contextRevision = 0;
@@ -396,8 +397,15 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
 
   function retainCurrentDraftEdits() {
     if (!activeDraft || activeDraft.sessionId !== text(currentComposerThreadId())) return;
-    const current = text(composerText());
-    if (current) activeDraft.text = current;
+    activeDraft.text = text(composerText());
+  }
+
+  function acknowledgeCommand(sequence) {
+    if (!Number.isInteger(sequence) || sequence <= 0) return;
+    pendingCommandAcknowledgements.add(sequence);
+    while (pendingCommandAcknowledgements.size > COMMAND_ACKNOWLEDGEMENT_LIMIT) {
+      pendingCommandAcknowledgements.delete(pendingCommandAcknowledgements.values().next().value);
+    }
   }
 
   function matchingDraft(message) {
@@ -547,7 +555,8 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         client_id: clientId,
         surface_revision: currentContext.revision,
         service_epoch: relayServiceEpoch,
-        after_sequence: lastCommandSequence,
+        after_sequence: 0,
+        acknowledged_sequences: [...pendingCommandAcknowledgements],
         command_results: pendingCommandResults.map((item) => Object.assign({}, item)),
         context: publicContext(),
       });
@@ -556,7 +565,8 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       if (nextServiceEpoch && nextServiceEpoch !== relayServiceEpoch) {
         const serviceRestarted = Boolean(relayServiceEpoch);
         relayServiceEpoch = nextServiceEpoch;
-        lastCommandSequence = 0;
+        pendingCommandAcknowledgements.clear();
+        inFlightCommandSequences.clear();
         pendingCommandResults = [];
         if (serviceRestarted) diagnostic("surface_host_service_restarted");
       }
@@ -566,15 +576,21 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       if (acceptedResultIds.size) {
         pendingCommandResults = pendingCommandResults.filter((item) => !acceptedResultIds.has(item.action_id));
       }
+      const acceptedCommandSequences = new Set(Array.isArray(result && result.accepted_command_sequences)
+        ? result.accepted_command_sequences.filter((value) => Number.isInteger(value) && value > 0)
+        : []);
+      for (const sequence of acceptedCommandSequences) pendingCommandAcknowledgements.delete(sequence);
       const commands = Array.isArray(result && result.commands) ? result.commands : [];
       for (const command of commands) {
-        if (!Number.isInteger(command.sequence) || command.sequence <= lastCommandSequence) continue;
+        if (!Number.isInteger(command.sequence) || command.sequence <= 0 ||
+          pendingCommandAcknowledgements.has(command.sequence)) continue;
         if (command.message && command.message.type === "host.action" && traceId(command.message.action_id)) {
           if (inFlightCommandSequences.has(command.sequence)) break;
           inFlightCommandSequences.add(command.sequence);
-          void handleMessage(command.message, { sequence: command.sequence }).finally(() => {
+          void handleMessage(command.message, { sequence: command.sequence }).then((outcome) => {
+            if (outcome !== COMMAND_RETRY) acknowledgeCommand(command.sequence);
+          }).finally(() => {
             inFlightCommandSequences.delete(command.sequence);
-            lastCommandSequence = Math.max(lastCommandSequence, command.sequence);
             relayAgain = true;
             if (!relayInFlight) {
               relayAgain = false;
@@ -585,7 +601,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         }
         const outcome = await handleMessage(command.message, { sequence: command.sequence });
         if (outcome === COMMAND_RETRY) break;
-        lastCommandSequence = command.sequence;
+        acknowledgeCommand(command.sequence);
       }
       return Boolean(result && result.ok);
     } catch (_) {
@@ -740,6 +756,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
 
   async function submitDraft(draft, mode, options = {}) {
     if (!currentContext) return COMMAND_RETRY;
+    if (!text(draft && draft.text)) return COMMAND_DISCARD;
     if (draft.sessionId !== currentContext.sessionId) {
       if (typeof sendDraft !== "function") return COMMAND_RETRY;
       await sendDraft({
@@ -811,6 +828,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     const draft = Object.assign({}, matchedDraft);
     if (action === "queue") {
       if (!text(composerTargetActiveTurnId())) return COMMAND_DISCARD;
+      if (!text(draft.text)) return COMMAND_DISCARD;
       queuedDrafts.push(draft);
       releaseDraft(matchedDraft);
       clearComposerIfOwned(draft);
@@ -972,6 +990,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
       queuedDrafts: queuedDrafts.map((draft) => Object.assign({}, draft)),
       queueTurnGate,
       pendingCommandResults: pendingCommandResults.map((item) => Object.assign({}, item)),
+      pendingCommandAcknowledgements: [...pendingCommandAcknowledgements],
       polishContextConsent,
       pendingCorrectionSuggestion: pendingCorrectionSuggestion
         ? Object.assign({}, pendingCorrectionSuggestion)

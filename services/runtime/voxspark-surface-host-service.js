@@ -384,6 +384,11 @@ function createVoxSparkSurfaceHostService(options = {}) {
       : 0;
     const acknowledgementMatchesService = traceId(input.service_epoch) === serviceEpoch;
     const effectiveAfterSequence = acknowledgementMatchesService ? afterSequence : 0;
+    const acknowledgedSequences = acknowledgementMatchesService && Array.isArray(input.acknowledged_sequences)
+      ? [...new Set(input.acknowledged_sequences.slice(0, MAX_PENDING_COMMANDS)
+        .filter((value) => Number.isInteger(value) && value > 0))]
+      : null;
+    const acceptedCommandSequences = acknowledgedSequences || [];
     const acceptedResultIds = [];
     if (acknowledgementMatchesService && Array.isArray(input.command_results)) {
       for (const rawResult of input.command_results.slice(0, MAX_PENDING_COMMANDS)) {
@@ -424,9 +429,10 @@ function createVoxSparkSurfaceHostService(options = {}) {
         reason: "command_expired",
       });
     }
-    if (effectiveAfterSequence > 0) {
+    if (acknowledgedSequences) {
+      const acknowledgedSet = new Set(acknowledgedSequences);
       const acknowledged = pendingCommands.filter((item) => (
-        item.clientId === clientId && item.sequence <= effectiveAfterSequence
+        item.clientId === clientId && acknowledgedSet.has(item.sequence)
       ));
       if (acknowledged.length) {
         logCommand("acknowledged", {
@@ -436,7 +442,21 @@ function createVoxSparkSurfaceHostService(options = {}) {
         });
       }
       pendingCommands = pendingCommands.filter((item) => (
-        item.clientId !== clientId || item.sequence > effectiveAfterSequence
+        item.clientId !== clientId || !acknowledgedSet.has(item.sequence)
+      ));
+    } else if (effectiveAfterSequence > 0) {
+      const acknowledged = pendingCommands.filter((item) => (
+        item.clientId === clientId && item.sequence === effectiveAfterSequence
+      ));
+      if (acknowledged.length) {
+        logCommand("acknowledged", {
+          sequences: acknowledged.map((item) => item.sequence),
+          capture_ids: acknowledged.map((item) => commandTrace(item.message).capture_id).filter(Boolean),
+          action_ids: acknowledged.map((item) => commandTrace(item.message).action_id).filter(Boolean),
+        });
+      }
+      pendingCommands = pendingCommands.filter((item) => (
+        item.clientId !== clientId || item.sequence !== effectiveAfterSequence
       ));
     }
     const targetIsLive = Boolean(target && target.expiresAt > now());
@@ -452,6 +472,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
         context_revision: target.contextRevision,
         lease_ms: leaseMs,
         commands: [],
+        accepted_command_sequences: acceptedCommandSequences,
         accepted_result_ids: acceptedResultIds,
       };
     }
@@ -528,7 +549,6 @@ function createVoxSparkSurfaceHostService(options = {}) {
       ? pendingCommands.filter((item) => (
         item.clientId === clientId
         && item.sessionId === context.session.id
-        && item.sequence > effectiveAfterSequence
       ))
       : [];
     for (const item of deliverable) item.deliveredAt = item.deliveredAt || now();
@@ -548,6 +568,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       context_revision: target.contextRevision,
       lease_ms: leaseMs,
       commands,
+      accepted_command_sequences: acceptedCommandSequences,
       accepted_result_ids: acceptedResultIds,
     };
   }

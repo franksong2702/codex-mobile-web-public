@@ -191,6 +191,11 @@ function initializeVoxSparkSurfaceHostRuntimeWiring() {
       body: JSON.stringify(payload),
       timeoutMs: 4000,
     }),
+    queueRequest: (operation, payload) => api(`/api/voxspark/surface/queue/${operation}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: operation === "complete" ? 10000 : 4000,
+    }),
     $,
     currentComposerThreadId,
     composerTargetThread,

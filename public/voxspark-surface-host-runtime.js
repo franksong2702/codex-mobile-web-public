@@ -318,6 +318,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   const approvalPending = deps.approvalPending || (() => false);
   const report = deps.report || (() => {});
   const relay = deps.relay || null;
+  const queueRequest = typeof deps.queueRequest === "function" ? deps.queueRequest : null;
   const setIntervalFn = deps.setInterval || window.setInterval;
   const clearIntervalFn = deps.clearInterval || window.clearInterval;
   const setTimeoutFn = deps.setTimeout || window.setTimeout;
@@ -369,6 +370,24 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
 
   function diagnostic(code, detail = {}) {
     report(code, Object.assign({ source: "voxspark-surface-host" }, detail));
+  }
+
+  function normalizeQueueSnapshot(value) {
+    if (!Array.isArray(value)) return [];
+    return value.slice(0, 8).map((item) => ({
+      queueId: traceId(item && item.queue_id),
+      actionId: traceId(item && item.action_id),
+      sessionId: text(item && item.session_id).slice(0, 128),
+      draftRevision: Number.isInteger(item && item.draft_revision) ? item.draft_revision : 0,
+      status: ["queued", "leased", "submitted", "processing", "failed", "unknown"].includes(item && item.status)
+        ? item.status
+        : "",
+      errorCode: traceId(item && item.error_code),
+    })).filter((item) => item.queueId && item.actionId && item.sessionId && item.draftRevision > 0 && item.status);
+  }
+
+  function rememberQueueSnapshot(value) {
+    queuedDrafts = normalizeQueueSnapshot(value);
   }
 
   function contextComposerDraft() {
@@ -561,6 +580,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         context: publicContext(),
       });
       relayConnected = Boolean(result && result.connected);
+      rememberQueueSnapshot(result && result.queue);
       const nextServiceEpoch = traceId(result && result.service_epoch);
       if (nextServiceEpoch && nextServiceEpoch !== relayServiceEpoch) {
         const serviceRestarted = Boolean(relayServiceEpoch);
@@ -603,6 +623,7 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
         if (outcome === COMMAND_RETRY) break;
         acknowledgeCommand(command.sequence);
       }
+      if (queuedDrafts.length) Promise.resolve().then(() => flushQueuedDrafts());
       return Boolean(result && result.ok);
     } catch (_) {
       relayConnected = false;
@@ -791,24 +812,64 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
   }
 
   async function flushQueuedDrafts() {
-    if (queueFlushing || !queuedDrafts.length || !currentContext) return false;
+    if (queueFlushing || !queuedDrafts.length || !currentContext || typeof queueRequest !== "function") return false;
     if (queueTurnGate !== "ready") return false;
     if (currentContext.approvalPending || text(composerTargetActiveTurnId())) return false;
     if (!currentContext.focused || text(composerText())) return false;
-    const draftIndex = queuedDrafts.findIndex((draft) => draft.sessionId === currentContext.sessionId);
-    if (draftIndex < 0) return false;
-    const draft = queuedDrafts[draftIndex];
+    const queued = queuedDrafts.find((item) => (
+      item.sessionId === currentContext.sessionId && item.status === "queued"
+    ));
+    if (!queued || typeof sendDraft !== "function") return false;
     queueFlushing = true;
     try {
-      const outcome = await submitDraft(draft, "submit", {
-        restoreWhenEmpty: true,
-        actionId: draft.queuedActionId,
+      const claimed = await queueRequest("claim", {
+        client_id: clientId,
+        service_epoch: relayServiceEpoch,
+        session_id: queued.sessionId,
+        queue_id: queued.queueId,
       });
-      if (outcome === COMMAND_ACCEPTED) {
-        queuedDrafts.splice(draftIndex, 1);
-        queueTurnGate = "awaiting_running";
+      if (!claimed || !claimed.ok || !text(claimed.text) || !traceId(claimed.lease_token)) {
+        return false;
       }
-      return outcome === COMMAND_ACCEPTED;
+      rememberQueueSnapshot([claimed.queue, ...queuedDrafts.filter((item) => item.queueId !== queued.queueId)]);
+      let outcome = "succeeded";
+      let errorCode = "";
+      try {
+        await sendDraft({
+          threadId: queued.sessionId,
+          thread: composerTargetThread() || {},
+          activeTurnId: "",
+          text: claimed.text,
+          mode: "submit",
+          clientSubmissionId: traceId(claimed.client_submission_id),
+        });
+      } catch (err) {
+        outcome = err && err.code === "voxspark_submission_outcome_unknown" ? "unknown" : "failed";
+        errorCode = outcome === "unknown" ? "action_outcome_unknown" : "queue_submission_failed";
+      }
+      const completed = await queueRequest("complete", {
+        client_id: clientId,
+        service_epoch: relayServiceEpoch,
+        session_id: queued.sessionId,
+        queue_id: queued.queueId,
+        lease_token: traceId(claimed.lease_token),
+        outcome,
+        error_code: errorCode,
+      });
+      if (completed && completed.queue) {
+        rememberQueueSnapshot([completed.queue, ...queuedDrafts.filter((item) => item.queueId !== queued.queueId)]);
+      }
+      if (outcome === "succeeded" && completed && completed.ok) {
+        queueTurnGate = "awaiting_running";
+        diagnostic("queue_submission_confirmed", { action: "queue", actionId: queued.actionId });
+        return true;
+      }
+      diagnostic("queue_submission_failed", {
+        action: "queue",
+        actionId: queued.actionId,
+        outcome,
+      });
+      return false;
     } finally {
       queueFlushing = false;
     }
@@ -835,8 +896,20 @@ function createVoxSparkSurfaceHostRuntime(deps = {}) {
     if (action === "queue") {
       if (!text(composerTargetActiveTurnId())) return COMMAND_DISCARD;
       if (!text(draft.text)) return COMMAND_DISCARD;
-      draft.queuedActionId = traceId(message.action_id);
-      queuedDrafts.push(draft);
+      if (typeof queueRequest !== "function") return COMMAND_RETRY;
+      const actionId = traceId(message.action_id);
+      const queued = await queueRequest("enqueue", {
+        client_id: clientId,
+        service_epoch: relayServiceEpoch,
+        session_id: draft.sessionId,
+        queue_id: actionId,
+        action_id: actionId,
+        capture_id: draft.captureId,
+        draft_revision: draft.draftRevision,
+        text: draft.text,
+      });
+      if (!queued || !queued.ok || !queued.queue) return COMMAND_RETRY;
+      rememberQueueSnapshot([queued.queue, ...queuedDrafts.filter((item) => item.queueId !== actionId)]);
       releaseDraft(matchedDraft);
       clearComposerIfOwned(draft);
       return COMMAND_ACCEPTED;

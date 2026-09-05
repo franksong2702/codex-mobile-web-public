@@ -15,6 +15,9 @@ const {
   createVoxSparkSurfaceTransactionStore,
 } = require("../services/runtime/voxspark-surface-transaction-store");
 const {
+  createVoxSparkEncryptedQueueStore,
+} = require("../services/runtime/voxspark-encrypted-queue-store");
+const {
   createVoxSparkSurfaceHostRouteService,
 } = require("../server-routes/voxspark-surface-host-route-service");
 
@@ -85,6 +88,19 @@ function transactionStoreFixture(t) {
   const filePath = path.join(directory, "surface-transactions.json");
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return () => createVoxSparkSurfaceTransactionStore({ filePath });
+}
+
+function persistentStoresFixture(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "voxspark-service-persistent-"));
+  const transactionFile = path.join(directory, "surface-transactions.json");
+  const queueFile = path.join(directory, "queued-submissions.enc");
+  const key = Buffer.alloc(32, 7);
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  return {
+    queueFile,
+    createTransactionStore: () => createVoxSparkSurfaceTransactionStore({ filePath: transactionFile }),
+    createQueueStore: () => createVoxSparkEncryptedQueueStore({ filePath: queueFile, keyProvider: () => key }),
+  };
 }
 
 test("VoxSpark backend accepts only exact loopback Host URLs", () => {
@@ -833,12 +849,414 @@ test("an acknowledged action without a result becomes unknown after restart", (t
   secondService.stop();
 });
 
+test("Queue body is encrypted, survives backend restart, and transfers only with its Session", (t) => {
+  FakeWebSocket.instances = [];
+  const stores = persistentStoresFixture(t);
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: stores.createTransactionStore(),
+    queueStore: stores.createQueueStore(),
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const runningContext = context("session-a", true, 1000);
+  runningContext.turn.state = "running";
+  const firstService = createService();
+  publish(firstService, { context: runningContext });
+  const firstSocket = FakeWebSocket.instances.at(-1);
+  firstSocket.open();
+  firstSocket.message({
+    type: "host.action",
+    action: "queue",
+    action_id: "queue-action-a",
+    context_revision: 1,
+    draft_revision: 8,
+    capture_id: "capture-a",
+  });
+  publish(firstService, { context: runningContext });
+
+  const queued = firstService.enqueueQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-action-a",
+    action_id: "queue-action-a",
+    draft_revision: 8,
+    capture_id: "capture-a",
+    text: "Sensitive queued Composer body.",
+  });
+  assert.equal(queued.ok, true);
+  assert.equal(queued.queue.status, "queued");
+  const duplicate = firstService.enqueueQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-action-a",
+    action_id: "queue-action-a",
+    draft_revision: 8,
+    capture_id: "capture-a",
+    text: "Sensitive queued Composer body.",
+  });
+  assert.equal(duplicate.ok, true);
+  assert.equal(duplicate.deduplicated, true);
+  const encrypted = fs.readFileSync(stores.queueFile, "utf8");
+  assert.doesNotMatch(encrypted, /Sensitive queued Composer body/);
+  assert.doesNotMatch(encrypted, /session-a/);
+  firstService.stop();
+
+  const secondService = createService();
+  const sessionB = publish(secondService, {
+    client_id: "browser-after-refresh",
+    surface_revision: 2,
+    context: context("session-b", true, 2000),
+  });
+  assert.deepEqual(sessionB.queue, []);
+  const recovered = publish(secondService, {
+    client_id: "browser-after-refresh",
+    surface_revision: 3,
+    context: context("session-a", true, 3000),
+  });
+  assert.equal(recovered.queue.length, 1);
+  assert.equal(recovered.queue[0].queue_id, "queue-action-a");
+  assert.equal(recovered.queue[0].status, "queued");
+
+  const claimed = secondService.claimQueue({
+    client_id: "browser-after-refresh",
+    session_id: "session-a",
+    queue_id: "queue-action-a",
+  });
+  assert.equal(claimed.ok, true);
+  assert.equal(claimed.text, "Sensitive queued Composer body.");
+  const completed = secondService.completeQueue({
+    client_id: "browser-after-refresh",
+    session_id: "session-a",
+    queue_id: "queue-action-a",
+    lease_token: claimed.lease_token,
+    outcome: "succeeded",
+  });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.queue.status, "submitted");
+
+  const runningAfterSubmit = context("session-a", true, 3000);
+  runningAfterSubmit.turn.state = "running";
+  assert.equal(publish(secondService, {
+    client_id: "browser-after-refresh",
+    surface_revision: 4,
+    context: runningAfterSubmit,
+  }).queue[0].status, "processing");
+  assert.deepEqual(publish(secondService, {
+    client_id: "browser-after-refresh",
+    surface_revision: 5,
+    context: context("session-a", true, 3000),
+  }).queue, []);
+  secondService.stop();
+});
+
+test("a Queue lease becomes unknown after backend restart and is never reclaimed", (t) => {
+  FakeWebSocket.instances = [];
+  const stores = persistentStoresFixture(t);
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: stores.createTransactionStore(),
+    queueStore: stores.createQueueStore(),
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const runningContext = context("session-a", true, 1000);
+  runningContext.turn.state = "running";
+  const firstService = createService();
+  publish(firstService, { context: runningContext });
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.open();
+  socket.message({
+    type: "host.action",
+    action: "queue",
+    action_id: "queue-uncertain",
+    context_revision: 1,
+    draft_revision: 9,
+  });
+  publish(firstService, { context: runningContext });
+  assert.equal(firstService.enqueueQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-uncertain",
+    action_id: "queue-uncertain",
+    draft_revision: 9,
+    text: "Do not replay me after a crash.",
+  }).ok, true);
+  publish(firstService, { context: context("session-a", true, 1000) });
+  const claimed = firstService.claimQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-uncertain",
+  });
+  assert.equal(claimed.ok, true);
+  firstService.stop();
+
+  const secondService = createService();
+  const restored = publish(secondService, {
+    client_id: "browser-new",
+    surface_revision: 2,
+    context: context("session-a", true, 2000),
+  });
+  assert.equal(restored.queue[0].status, "unknown");
+  assert.equal(secondService.claimQueue({
+    client_id: "browser-new",
+    session_id: "session-a",
+    queue_id: "queue-uncertain",
+  }).code, "queue_unknown");
+  secondService.stop();
+});
+
+test("a stale browser cannot complete the active browser Queue lifecycle", (t) => {
+  FakeWebSocket.instances = [];
+  const stores = persistentStoresFixture(t);
+  const service = createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: stores.createTransactionStore(),
+    queueStore: stores.createQueueStore(),
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const running = context("session-a", true, 1000);
+  running.turn.state = "running";
+  publish(service, { context: running });
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.open();
+  socket.message({
+    type: "host.action",
+    action: "queue",
+    action_id: "queue-owner-fence",
+    context_revision: 1,
+    draft_revision: 12,
+  });
+  publish(service, { context: running });
+  assert.equal(service.enqueueQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-owner-fence",
+    action_id: "queue-owner-fence",
+    draft_revision: 12,
+    text: "Owner fencing test.",
+  }).ok, true);
+  publish(service, { context: context("session-a", true, 1000) });
+  const claimed = service.claimQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-owner-fence",
+  });
+  assert.equal(service.completeQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-owner-fence",
+    lease_token: claimed.lease_token,
+    outcome: "succeeded",
+  }).queue.status, "submitted");
+
+  const ownerRunning = context("session-a", true, 2000);
+  ownerRunning.turn.state = "running";
+  assert.equal(publish(service, {
+    client_id: "browser-b",
+    surface_revision: 2,
+    context: ownerRunning,
+  }).queue[0].status, "processing");
+  const stale = publish(service, {
+    client_id: "browser-a",
+    surface_revision: 3,
+    context: context("session-a", true, 1000),
+  });
+  assert.deepEqual(stale.commands, []);
+  assert.equal(publish(service, {
+    client_id: "browser-b",
+    surface_revision: 3,
+    context: ownerRunning,
+  }).queue[0].status, "processing");
+  service.stop();
+});
+
+test("a submitted Queue becomes unknown after backend restart", (t) => {
+  FakeWebSocket.instances = [];
+  const stores = persistentStoresFixture(t);
+  const createService = () => createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    transactionStore: stores.createTransactionStore(),
+    queueStore: stores.createQueueStore(),
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const running = context("session-a", true, 1000);
+  running.turn.state = "running";
+  const firstService = createService();
+  publish(firstService, { context: running });
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.open();
+  socket.message({
+    type: "host.action",
+    action: "queue",
+    action_id: "queue-submitted-restart",
+    context_revision: 1,
+    draft_revision: 14,
+  });
+  publish(firstService, { context: running });
+  assert.equal(firstService.enqueueQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-submitted-restart",
+    action_id: "queue-submitted-restart",
+    draft_revision: 14,
+    text: "Submitted before restart.",
+  }).ok, true);
+  publish(firstService, { context: context("session-a", true, 1000) });
+  const claimed = firstService.claimQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-submitted-restart",
+  });
+  assert.equal(firstService.completeQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-submitted-restart",
+    lease_token: claimed.lease_token,
+    outcome: "succeeded",
+  }).queue.status, "submitted");
+  firstService.stop();
+
+  const secondService = createService();
+  const restored = publish(secondService, {
+    client_id: "browser-b",
+    surface_revision: 2,
+    context: context("session-a", true, 2000),
+  });
+  assert.equal(restored.queue[0].status, "unknown");
+  assert.equal(restored.queue[0].error_code, "queue_outcome_unknown_after_restart");
+  secondService.stop();
+
+  const thirdService = createService();
+  const restoredAgain = publish(thirdService, {
+    client_id: "browser-c",
+    surface_revision: 3,
+    context: context("session-a", true, 3000),
+  });
+  assert.equal(restoredAgain.queue[0].status, "unknown");
+  assert.equal(restoredAgain.queue[0].error_code, "queue_outcome_unknown_after_restart");
+  thirdService.stop();
+});
+
+test("Queue mutations roll back in memory when encrypted persistence fails", () => {
+  FakeWebSocket.instances = [];
+  let stored = null;
+  let writable = true;
+  const queueStore = {
+    load: () => stored,
+    save(entries) {
+      if (!writable) return false;
+      stored = structuredClone(entries);
+      return true;
+    },
+    status: () => ({ lastWriteStatus: writable ? "ok" : "write-failed" }),
+  };
+  const service = createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    queueStore,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const running = context("session-a", true, 1000);
+  running.turn.state = "running";
+  publish(service, { context: running });
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.open();
+  socket.message({
+    type: "host.action",
+    action: "queue",
+    action_id: "queue-persist-failure",
+    context_revision: 1,
+    draft_revision: 15,
+  });
+  publish(service, { context: running });
+  assert.equal(service.enqueueQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-persist-failure",
+    action_id: "queue-persist-failure",
+    draft_revision: 15,
+    text: "Persistence failure body.",
+  }).ok, true);
+  publish(service, { context: context("session-a", true, 1000) });
+
+  writable = false;
+  assert.equal(service.claimQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-persist-failure",
+  }).code, "queue_store_unavailable");
+  const snapshot = service.queueSnapshot({ client_id: "browser-a", session_id: "session-a" });
+  assert.equal(snapshot.items[0].status, "queued");
+  service.stop();
+});
+
+test("an unreadable encrypted Queue store is not overwritten", (t) => {
+  FakeWebSocket.instances = [];
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "voxspark-service-unreadable-"));
+  const filePath = path.join(directory, "queued-submissions.enc");
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const originalStore = createVoxSparkEncryptedQueueStore({
+    filePath,
+    keyProvider: () => Buffer.alloc(32, 1),
+  });
+  assert.equal(originalStore.save([{ sentinel: "encrypted-state" }]), true);
+  const originalEnvelope = fs.readFileSync(filePath, "utf8");
+  const unreadableStore = createVoxSparkEncryptedQueueStore({
+    filePath,
+    keyProvider: () => Buffer.alloc(32, 2),
+  });
+  const service = createVoxSparkSurfaceHostService({
+    WebSocket: FakeWebSocket,
+    queueStore: unreadableStore,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    logger: { info() {} },
+  });
+  const running = context("session-a", true, 1000);
+  running.turn.state = "running";
+  publish(service, { context: running });
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.open();
+  socket.message({
+    type: "host.action",
+    action: "queue",
+    action_id: "queue-unreadable-store",
+    context_revision: 1,
+    draft_revision: 16,
+  });
+  publish(service, { context: running });
+  assert.equal(service.enqueueQueue({
+    client_id: "browser-a",
+    session_id: "session-a",
+    queue_id: "queue-unreadable-store",
+    action_id: "queue-unreadable-store",
+    draft_revision: 16,
+    text: "Must not overwrite unreadable state.",
+  }).code, "queue_store_unavailable");
+  assert.equal(fs.readFileSync(filePath, "utf8"), originalEnvelope);
+  assert.equal(service.status().queue_store, "decrypt-failed");
+  service.stop();
+});
+
 test("authorized route exposes bounded context publish and status", async () => {
   const calls = [];
   const route = createVoxSparkSurfaceHostRouteService({
     service: {
       publish(body) { calls.push(["publish", body]); return { ok: true, connected: true }; },
       status() { calls.push(["status"]); return { connected: true }; },
+      enqueueQueue(body) { calls.push(["enqueue", body]); return { ok: true, queue: { status: "queued" } }; },
+      claimQueue(body) { calls.push(["claim", body]); return { ok: true, queue: { status: "leased" } }; },
+      completeQueue(body) { calls.push(["complete", body]); return { ok: true, queue: { status: "submitted" } }; },
+      cancelQueue(body) { calls.push(["cancel", body]); return { ok: true, queue: { status: "cancelled" } }; },
+      queueSnapshot(body) { calls.push(["snapshot", body]); return { ok: true, items: [] }; },
     },
   });
   const sent = [];
@@ -849,10 +1267,40 @@ test("authorized route exposes bounded context publish and status", async () => 
     sendJson: (status, body) => sent.push([status, body]),
   });
   await route.handleRoute({
+    url: new URL("http://127.0.0.1/api/voxspark/surface/queue/enqueue"),
+    method: "POST",
+    readBody: async () => ({ queue_id: "queue-a" }),
+    sendJson: (status, body) => sent.push([status, body]),
+  });
+  for (const operation of ["claim", "complete", "cancel", "snapshot"]) {
+    await route.handleRoute({
+      url: new URL(`http://127.0.0.1/api/voxspark/surface/queue/${operation}`),
+      method: "POST",
+      readBody: async () => ({ queue_id: `queue-${operation}` }),
+      sendJson: (status, body) => sent.push([status, body]),
+    });
+  }
+  await route.handleRoute({
     url: new URL("http://127.0.0.1/api/voxspark/surface/status"),
     method: "GET",
     sendJson: (status, body) => sent.push([status, body]),
   });
-  assert.deepEqual(calls, [["publish", { client_id: "a" }], ["status"]]);
-  assert.deepEqual(sent, [[200, { ok: true, connected: true }], [200, { connected: true }]]);
+  assert.deepEqual(calls, [
+    ["publish", { client_id: "a" }],
+    ["enqueue", { queue_id: "queue-a" }],
+    ["claim", { queue_id: "queue-claim" }],
+    ["complete", { queue_id: "queue-complete" }],
+    ["cancel", { queue_id: "queue-cancel" }],
+    ["snapshot", { queue_id: "queue-snapshot" }],
+    ["status"],
+  ]);
+  assert.deepEqual(sent, [
+    [200, { ok: true, connected: true }],
+    [200, { ok: true, queue: { status: "queued" } }],
+    [200, { ok: true, queue: { status: "leased" } }],
+    [200, { ok: true, queue: { status: "submitted" } }],
+    [200, { ok: true, queue: { status: "cancelled" } }],
+    [200, { ok: true, items: [] }],
+    [200, { connected: true }],
+  ]);
 });

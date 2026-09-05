@@ -1,6 +1,6 @@
 # VoxSpark Surface Host Adapter
 
-Status: persistent backend Host relay deployed; physical BOX reliability validation in progress
+Status: R3A/R3B source candidate; live listener remains on the earlier pre-R2 runtime
 
 ## Boundary
 
@@ -70,6 +70,21 @@ Pairing and transport authentication remain outside this pilot.
 An absent or incorrect value omits `polish_context`; it does not disable BOX
 input or the existing bounded `local_context.terms` path.
 
+R3 Queue durability also requires one 256-bit encryption key in the current
+macOS user's Keychain. Check or create it with:
+
+```bash
+bash scripts/macos/provision-voxspark-queue-key.sh --check
+bash scripts/macos/provision-voxspark-queue-key.sh --apply
+```
+
+The apply command is an operator action and is not run by a source build. If
+the key is missing, wrong, or the encrypted file cannot be authenticated,
+Queue fails closed before accepting new text. Send, Steer, Composer input, and
+the ordinary Host relay remain available. Repair requires preserving the
+unreadable file for diagnosis and restarting the Mobile listener only after a
+separate deployment authorization.
+
 ## Actions
 
 - `host.composer.replace` writes one finalized draft into the currently focused
@@ -79,11 +94,19 @@ input or the existing bounded `local_context.terms` path.
 - `submit` reuses Codex Mobile `sendMessage` only when the Session is idle.
 - `steer` reuses `sendMessage` only while the selected Session has an active
   turn, preserving the existing Codex steering path.
-- `queue` stores the finalized draft inside the adapter, clears only the
-  adapter-owned Composer text, and submits after the same Session is idle and
-  the Composer is still focused and empty. A subsequent queued draft cannot
-  submit until the prior submission has been observed running and then idle.
-  Failed submissions retain the adapter-owned draft for recovery.
+- `queue` transfers the complete authoritative Composer to the Mobile backend
+  before the browser releases its local draft. The backend encrypts the body
+  with AES-256-GCM, persists it atomically with mode `0600`, and returns only
+  content-free Queue metadata to Bridge and BOX. A browser for the same active
+  Session claims a 30-second lease after the turn becomes idle and submits the
+  stored body with a stable `clientSubmissionId`. Browser refresh may replace
+  the executor; it does not replace the Session owner or duplicate the Queue.
+- Queue lifecycle is `queued -> leased -> submitted -> processing ->
+  completed`. Failure and explicit uncertainty retain the encrypted body for
+  diagnosis; successful Codex submission removes the body immediately. A
+  restored `leased` or `submitted` entry becomes `unknown` instead of being
+  replayed blindly. A following Queue waits until the previous entry reaches a
+  terminal state.
 - `stop` reuses `interruptActiveTurn`; the two-touch confirmation remains owned
   by VoxSpark Bridge/BOX.
 
@@ -149,6 +172,11 @@ wins the backend arbitration.
   recovery, plus the authenticated route boundary.
 - Browser unit tests cover the relay transport and existing final-only draft,
   Send, Queue, Steer, Stop, blur, visibility, and Session-switch behavior.
+- R3 Queue tests cover encrypted-at-rest bodies, missing/wrong-key failure,
+  write-failure rollback, per-Session capacity and isolation, exact executor
+  leases, browser-refresh takeover, Mobile restart recovery, stable submission
+  ids, and stale-browser fencing. Plaintext Queue bodies are absent from the
+  encrypted envelope, Bridge context, BOX state, and diagnostics.
 - Correlation tests cover Composer confirmation, action confirmation/retry, and
   backend acknowledgement with the same content-free capture/action ids.
 - Classic and native frontend runtimes now report the same content-free action
@@ -210,6 +238,29 @@ wins the backend arbitration.
   mutation was attempted in this readback.
 - No LAN binding, audio path, firmware change, or physical BOX validation has
   been performed.
+
+## 2026-09-06 Checkpoint R3A/R3B Queue durability candidate
+
+- R3A moves accepted Queue text out of browser memory into the Mobile backend.
+  The encrypted store lives under the existing runtime root at
+  `voxspark/queued-submissions.enc`; its key is retrieved from macOS Keychain
+  service `com.xuefusong.codex-mobile.voxspark-queue` and is never written to
+  the store, repository, logs, or API responses.
+- R3B gives each Queue a stable `queue_id == action_id`, Session ownership,
+  draft revision, stable `clientSubmissionId`, and a short executor lease. The
+  browser remains the Codex executor, but refresh no longer owns Queue truth.
+  Only the current Surface lease holder may claim or advance lifecycle state.
+- Mobile sends only content-free Queue status to Bridge. VoxSpark projects it
+  through the existing Session-scoped action surface, so this checkpoint does
+  not require a BOX firmware change.
+- Automated evidence: focused Mobile Queue/Host tests `65/65`, complete Mobile
+  tests `2702/2702`, complete VoxSpark tests Node `150/150` and Python `6/6`.
+  Frontend build/manifest, syntax, project, macOS script, and both repositories'
+  diff checks returned exit 0.
+- Source only: no Keychain key was provisioned, no runtime file was created,
+  and no listener, Bridge, ChatGPT, or BOX was restarted, deployed, flashed, or
+  pushed. Real browser refresh, listener restart, and physical BOX acceptance
+  remain the next deployment gate.
 - A later live Bridge restart exposed a backend reconnect stall: the persisted
   service was configured, while both a direct WebSocket and a fresh service
   instance could connect. The Host service now bounds `CONNECTING` to five

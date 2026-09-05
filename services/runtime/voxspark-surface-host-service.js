@@ -15,6 +15,12 @@ const MAX_COMPOSER_BYTES = 8 * 1024;
 const MAX_CORRECTION_RULES = 32;
 const MAX_TRANSACTION_RECEIPTS = 64;
 const TRANSACTION_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_ACTIVE_QUEUE_ENTRIES = 8;
+const MAX_QUEUE_RECEIPTS = 64;
+const MAX_QUEUE_ENTRIES_PER_SESSION = 3;
+const MAX_QUEUE_TEXT_BYTES = 128 * 1024;
+const QUEUE_ENTRY_TTL_MS = 24 * 60 * 60 * 1000;
+const QUEUE_LEASE_MS = 30_000;
 const POLISH_CONTEXT_CONSENT = "bounded-context-v1";
 const SESSION_PROFILES = new Set(["general", "coding-agent", "journal", "product-discussion"]);
 const LANGUAGE_POLICIES = new Set(["auto", "zh-CN-mixed"]);
@@ -207,6 +213,61 @@ function normalizeStoredLedger(value, nowMs) {
   };
 }
 
+function normalizeQueueEntry(value, nowMs) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const queueId = traceId(value.queueId);
+  const actionId = traceId(value.actionId);
+  const clientId = traceId(value.clientId);
+  const sessionId = boundedText(value.sessionId, 128);
+  const clientSubmissionId = traceId(value.clientSubmissionId);
+  const captureId = traceId(value.captureId);
+  const draftRevision = Number(value.draftRevision);
+  const status = ["queued", "leased", "submitted", "processing", "completed", "failed", "unknown", "cancelled"].includes(value.status)
+    ? value.status
+    : "";
+  const createdAt = Number(value.createdAt);
+  const updatedAt = Number(value.updatedAt);
+  const expiresAt = Number(value.expiresAt);
+  const draftText = typeof value.text === "string" ? value.text.trim() : "";
+  if (!queueId || !actionId || !clientId || !sessionId || !clientSubmissionId || !status
+    || !Number.isInteger(draftRevision) || draftRevision < 1
+    || !Number.isFinite(createdAt) || !Number.isFinite(updatedAt) || !Number.isFinite(expiresAt)
+    || expiresAt <= nowMs || utf8Bytes(draftText) > MAX_QUEUE_TEXT_BYTES
+    || (!["submitted", "processing", "completed", "unknown", "cancelled"].includes(status) && !draftText)) return null;
+  return {
+    queueId,
+    actionId,
+    clientId,
+    sessionId,
+    clientSubmissionId,
+    captureId,
+    draftRevision,
+    text: draftText,
+    status,
+    createdAt,
+    updatedAt,
+    expiresAt,
+    leaseToken: traceId(value.leaseToken),
+    leaseClientId: traceId(value.leaseClientId),
+    leaseExpiresAt: Number.isFinite(Number(value.leaseExpiresAt)) ? Number(value.leaseExpiresAt) : 0,
+    errorCode: traceId(value.errorCode),
+  };
+}
+
+function publicQueueEntry(entry) {
+  if (!entry) return null;
+  return {
+    queue_id: entry.queueId,
+    action_id: entry.actionId,
+    session_id: entry.sessionId,
+    draft_revision: entry.draftRevision,
+    status: entry.status,
+    created_at: entry.createdAt,
+    updated_at: entry.updatedAt,
+    error_code: entry.errorCode || "",
+  };
+}
+
 function safeLoopbackBridgeUrl(value) {
   try {
     const parsed = new URL(String(value || "").trim());
@@ -282,7 +343,19 @@ function createVoxSparkSurfaceHostService(options = {}) {
     && typeof options.transactionStore.save === "function"
     ? options.transactionStore
     : null;
+  const queueStore = options.queueStore
+    && typeof options.queueStore.load === "function"
+    && typeof options.queueStore.save === "function"
+    ? options.queueStore
+    : null;
   const restoredLedger = normalizeStoredLedger(transactionStore ? transactionStore.load() : null, now());
+  const restoredQueue = queueStore ? queueStore.load() : null;
+  const restoredQueueStatus = queueStore && typeof queueStore.status === "function"
+    ? queueStore.status().lastReadStatus || ""
+    : "";
+  const queueStoreReady = Boolean(queueStore
+    && !["key-unavailable", "decrypt-failed", "invalid-size", "unsupported-version", "invalid-state", "read-failed"]
+      .includes(restoredQueueStatus));
 
   let bridgeUrl = "";
   let socket = null;
@@ -299,6 +372,10 @@ function createVoxSparkSurfaceHostService(options = {}) {
   let commandAckReceipts = restoredLedger.commandAckReceipts;
   let appendReceipts = restoredLedger.appendReceipts;
   let actionReceipts = restoredLedger.actionReceipts;
+  let queueEntries = (Array.isArray(restoredQueue) ? restoredQueue : [])
+    .map((item) => normalizeQueueEntry(item, now()))
+    .filter(Boolean)
+    .slice(-MAX_QUEUE_RECEIPTS);
 
   function logCommand(event, details = {}) {
     if (!logger || typeof logger.info !== "function") return;
@@ -320,6 +397,249 @@ function createVoxSparkSurfaceHostService(options = {}) {
     });
     if (!saved) logCommand("ledger_write_failed");
     return saved;
+  }
+
+  function persistQueue() {
+    if (!queueStoreReady) return false;
+    const saved = queueStore.save(queueEntries);
+    if (!saved) logCommand("queue_store_write_failed", {
+      status: typeof queueStore.status === "function"
+        ? queueStore.status().lastWriteStatus || "failed"
+        : "failed",
+    });
+    return saved;
+  }
+
+  function trimQueue() {
+    const timestamp = now();
+    let changed = false;
+    for (const entry of queueEntries) {
+      if (entry.status !== "leased" || entry.leaseExpiresAt > timestamp) continue;
+      entry.status = "unknown";
+      entry.errorCode = "queue_outcome_unknown_after_lease";
+      entry.leaseToken = "";
+      entry.leaseClientId = "";
+      entry.leaseExpiresAt = 0;
+      entry.updatedAt = timestamp;
+      changed = true;
+    }
+    const before = queueEntries.length;
+    const retained = queueEntries.filter((item) => item.expiresAt > timestamp);
+    const unresolved = retained.filter((item) => !["completed", "cancelled"].includes(item.status));
+    const resolved = retained.filter((item) => ["completed", "cancelled"].includes(item.status));
+    const resolvedSlots = Math.max(0, MAX_QUEUE_RECEIPTS - Math.min(unresolved.length, MAX_QUEUE_RECEIPTS));
+    const retainedResolved = resolvedSlots ? resolved.slice(-resolvedSlots) : [];
+    queueEntries = [...unresolved.slice(-MAX_QUEUE_RECEIPTS), ...retainedResolved]
+      .sort((left, right) => left.createdAt - right.createdAt);
+    if (changed || queueEntries.length !== before) persistQueue();
+  }
+
+  function queueEntriesForSession(sessionId) {
+    trimQueue();
+    return queueEntries
+      .filter((item) => item.sessionId === sessionId && !["completed", "cancelled"].includes(item.status))
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  function queueContext(sessionId) {
+    const entry = queueEntriesForSession(sessionId)[0] || null;
+    return publicQueueEntry(entry);
+  }
+
+  function reconcileQueueTurnState(sessionId, turnState) {
+    let changed = false;
+    const timestamp = now();
+    for (const entry of queueEntries) {
+      if (entry.sessionId !== sessionId) continue;
+      if (turnState === "running" && entry.status === "submitted") {
+        entry.status = "processing";
+        entry.updatedAt = timestamp;
+        changed = true;
+      } else if (turnState === "idle" && entry.status === "processing") {
+        entry.status = "completed";
+        entry.updatedAt = timestamp;
+        changed = true;
+      }
+    }
+    if (changed) persistQueue();
+    return changed;
+  }
+
+  function queueTargetChanged(sessionId) {
+    if (target && target.context.session.id === sessionId) sendTargetContext();
+  }
+
+  function queueSessionMatches(input, entry = null) {
+    const clientId = traceId(input && input.client_id);
+    const sessionId = boundedText(input && input.session_id, 128);
+    if (!clientId || !sessionId) return false;
+    if (entry && entry.sessionId !== sessionId) return false;
+    return true;
+  }
+
+  function enqueueQueue(input = {}) {
+    trimQueue();
+    const queueId = traceId(input.queue_id);
+    const actionId = traceId(input.action_id);
+    const clientId = traceId(input.client_id);
+    const sessionId = boundedText(input.session_id, 128);
+    const captureId = traceId(input.capture_id);
+    const draftRevision = Number(input.draft_revision);
+    const draftText = typeof input.text === "string" ? input.text.trim() : "";
+    if (!queueId || queueId !== actionId || !clientId || !sessionId || !draftText
+      || !Number.isInteger(draftRevision) || draftRevision < 1
+      || utf8Bytes(draftText) > MAX_QUEUE_TEXT_BYTES) {
+      return { ok: false, code: "invalid_queue" };
+    }
+    const receipt = actionReceipt(actionId);
+    if (!receipt || receipt.clientId !== clientId || receipt.sessionId !== sessionId) {
+      return { ok: false, code: "queue_action_not_owned" };
+    }
+    const existing = queueEntries.find((item) => item.queueId === queueId);
+    if (existing) {
+      const matches = existing.actionId === actionId && existing.clientId === clientId
+        && existing.sessionId === sessionId && existing.draftRevision === draftRevision;
+      return matches
+        ? { ok: true, queue: publicQueueEntry(existing), deduplicated: true }
+        : { ok: false, code: "queue_id_conflict" };
+    }
+    if (queueEntriesForSession(sessionId).length >= MAX_QUEUE_ENTRIES_PER_SESSION
+      || queueEntries.filter((item) => !["completed", "cancelled"].includes(item.status)).length >= MAX_ACTIVE_QUEUE_ENTRIES) {
+      return { ok: false, code: "queue_capacity_reached" };
+    }
+    const timestamp = now();
+    const entry = {
+      queueId,
+      actionId,
+      clientId,
+      sessionId,
+      clientSubmissionId: traceId(`voxspark-${actionId}`),
+      captureId,
+      draftRevision,
+      text: draftText,
+      status: "queued",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      expiresAt: timestamp + QUEUE_ENTRY_TTL_MS,
+      leaseToken: "",
+      leaseClientId: "",
+      leaseExpiresAt: 0,
+      errorCode: "",
+    };
+    if (!entry.clientSubmissionId) return { ok: false, code: "invalid_queue_submission_id" };
+    queueEntries.push(entry);
+    if (!persistQueue()) {
+      queueEntries = queueEntries.filter((item) => item.queueId !== queueId);
+      return { ok: false, code: "queue_store_unavailable" };
+    }
+    logCommand("queue_persisted", { queue_id: queueId, action_id: actionId, session_id: sessionId });
+    queueTargetChanged(sessionId);
+    return { ok: true, queue: publicQueueEntry(entry), deduplicated: false };
+  }
+
+  function claimQueue(input = {}) {
+    trimQueue();
+    const queueId = traceId(input.queue_id);
+    const clientId = traceId(input.client_id);
+    const sessionId = boundedText(input.session_id, 128);
+    if (!queueId || !queueSessionMatches(input) || !target || target.expiresAt <= now()
+      || target.clientId !== clientId || target.context.session.id !== sessionId
+      || !target.context.composer.focused || target.context.turn.state !== "idle"
+      || target.context.turn.approval_pending) {
+      return { ok: false, code: "queue_target_unavailable" };
+    }
+    const entry = queueEntries.find((item) => item.queueId === queueId);
+    if (!entry || !queueSessionMatches(input, entry)) return { ok: false, code: "queue_not_found" };
+    if (entry.status !== "queued") {
+      return { ok: false, code: `queue_${entry.status}`, queue: publicQueueEntry(entry) };
+    }
+    if (queueEntries.some((item) => item.sessionId === sessionId
+      && item.queueId !== queueId && ["leased", "submitted", "processing"].includes(item.status))) {
+      return { ok: false, code: "queue_predecessor_active" };
+    }
+    const timestamp = now();
+    const leaseToken = traceId(crypto.randomUUID());
+    const previous = { ...entry };
+    entry.status = "leased";
+    entry.leaseToken = leaseToken;
+    entry.leaseClientId = clientId;
+    entry.leaseExpiresAt = timestamp + QUEUE_LEASE_MS;
+    entry.updatedAt = timestamp;
+    if (!persistQueue()) {
+      Object.assign(entry, previous);
+      return { ok: false, code: "queue_store_unavailable" };
+    }
+    queueTargetChanged(sessionId);
+    return {
+      ok: true,
+      lease_token: leaseToken,
+      text: entry.text,
+      client_submission_id: entry.clientSubmissionId,
+      queue: publicQueueEntry(entry),
+    };
+  }
+
+  function completeQueue(input = {}) {
+    trimQueue();
+    const queueId = traceId(input.queue_id);
+    const leaseToken = traceId(input.lease_token);
+    const outcome = ["succeeded", "failed", "unknown"].includes(input.outcome) ? input.outcome : "";
+    const entry = queueEntries.find((item) => item.queueId === queueId);
+    if (!queueId || !leaseToken || !outcome || !entry || !queueSessionMatches(input, entry)
+      || entry.status !== "leased" || entry.leaseToken !== leaseToken
+      || entry.leaseClientId !== traceId(input.client_id)) {
+      return { ok: false, code: "queue_lease_mismatch" };
+    }
+    const previous = { ...entry };
+    entry.status = outcome === "succeeded" ? "submitted" : outcome;
+    entry.errorCode = outcome === "succeeded" ? "" : traceId(input.error_code) || "queue_submission_failed";
+    entry.leaseToken = "";
+    entry.leaseClientId = "";
+    entry.leaseExpiresAt = 0;
+    entry.updatedAt = now();
+    if (outcome === "succeeded") entry.text = "";
+    if (!persistQueue()) {
+      Object.assign(entry, previous);
+      return { ok: false, code: "queue_store_unavailable" };
+    }
+    logCommand("queue_completed", { queue_id: queueId, session_id: entry.sessionId, outcome });
+    queueTargetChanged(entry.sessionId);
+    return { ok: true, queue: publicQueueEntry(entry) };
+  }
+
+  function cancelQueue(input = {}) {
+    trimQueue();
+    const queueId = traceId(input.queue_id);
+    const entry = queueEntries.find((item) => item.queueId === queueId);
+    if (!queueId || !entry || !queueSessionMatches(input, entry)
+      || !["queued", "failed"].includes(entry.status)) {
+      return { ok: false, code: "queue_not_cancellable" };
+    }
+    const previous = { ...entry };
+    entry.status = "cancelled";
+    entry.text = "";
+    entry.errorCode = "";
+    entry.updatedAt = now();
+    if (!persistQueue()) {
+      Object.assign(entry, previous);
+      return { ok: false, code: "queue_store_unavailable" };
+    }
+    queueTargetChanged(entry.sessionId);
+    return { ok: true, queue: publicQueueEntry(entry) };
+  }
+
+  function queueSnapshot(input = {}) {
+    const sessionId = boundedText(input.session_id, 128);
+    const clientId = traceId(input.client_id);
+    if (!sessionId || !clientId) return { ok: false, code: "invalid_queue_snapshot" };
+    if (!target || target.expiresAt <= now() || target.clientId !== clientId
+      || target.context.session.id !== sessionId) {
+      return { ok: false, code: "queue_target_unavailable" };
+    }
+    return {
+      ok: true,
+      items: queueEntriesForSession(sessionId).map(publicQueueEntry),
+    };
   }
 
   function trimReceipts() {
@@ -403,7 +723,23 @@ function createVoxSparkSurfaceHostService(options = {}) {
     if (transactionStore) persistTransactions();
   }
 
+  function markRestoredQueueUncertain() {
+    let changed = false;
+    for (const entry of queueEntries) {
+      if (!["leased", "submitted"].includes(entry.status)) continue;
+      entry.status = "unknown";
+      entry.errorCode = "queue_outcome_unknown_after_restart";
+      entry.leaseToken = "";
+      entry.leaseClientId = "";
+      entry.leaseExpiresAt = 0;
+      entry.updatedAt = now();
+      changed = true;
+    }
+    if (changed) persistQueue();
+  }
+
   markRestoredTransactionsUncertain();
+  markRestoredQueueUncertain();
 
   function socketIsOpen() {
     return Boolean(socket && WebSocketImpl && socket.readyState === WebSocketImpl.OPEN);
@@ -421,6 +757,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       type: "host.context",
       context_revision: target.contextRevision,
       ...target.context,
+      queue: queueContext(target.context.session.id),
     });
   }
 
@@ -835,6 +1172,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       fingerprint,
       expiresAt: now() + leaseMs,
     };
+    const queueStateChanged = reconcileQueueTurnState(context.session.id, context.turn.state);
     contextOwners.set(target.contextRevision, {
       clientId: target.clientId,
       sessionId: target.context.session.id,
@@ -845,7 +1183,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       contextOwners.delete(contextOwners.keys().next().value);
     }
     scheduleLease();
-    if (changed) sendTargetContext();
+    if (changed || queueStateChanged) sendTargetContext();
     const deliverable = context.composer.focused
       ? pendingCommands.filter((item) => (
         item.clientId === clientId
@@ -886,6 +1224,7 @@ function createVoxSparkSurfaceHostService(options = {}) {
       commands,
       accepted_command_sequences: acceptedCommandSequences,
       accepted_result_ids: acceptedResultIds,
+      queue: queueEntriesForSession(context.session.id).map(publicQueueEntry),
     };
   }
 
@@ -899,8 +1238,13 @@ function createVoxSparkSurfaceHostService(options = {}) {
       pending_results: pendingResults.length,
       uncertain_appends: appendReceipts.filter((item) => item.phase === "uncertain").length,
       uncertain_actions: actionReceipts.filter((item) => item.phase === "unknown").length,
+      queue_pending: queueEntries.filter((item) => ["queued", "leased"].includes(item.status)).length,
+      queue_failed: queueEntries.filter((item) => ["failed", "unknown"].includes(item.status)).length,
       transaction_store: transactionStore && typeof transactionStore.status === "function"
         ? transactionStore.status().lastWriteStatus || transactionStore.status().lastReadStatus || "enabled"
+        : "disabled",
+      queue_store: queueStore && typeof queueStore.status === "function"
+        ? queueStore.status().lastWriteStatus || queueStore.status().lastReadStatus || "enabled"
         : "disabled",
     };
   }
@@ -928,7 +1272,17 @@ function createVoxSparkSurfaceHostService(options = {}) {
     if (logger && typeof logger.info === "function") logger.info("[voxspark] surface host stopped");
   }
 
-  return { publish, publicConfig, status, stop };
+  return {
+    publish,
+    publicConfig,
+    status,
+    stop,
+    enqueueQueue,
+    claimQueue,
+    completeQueue,
+    cancelQueue,
+    queueSnapshot,
+  };
 }
 
 module.exports = {
@@ -936,5 +1290,7 @@ module.exports = {
   createVoxSparkSurfaceHostService,
   normalizeContext,
   normalizePolishContext,
+  normalizeQueueEntry,
+  publicQueueEntry,
   safeLoopbackBridgeUrl,
 };

@@ -85,6 +85,8 @@ function createFixture(options = {}) {
   const diagnostics = [];
   const relayedContexts = [];
   const relayRequests = [];
+  const queueRequests = [];
+  const queueEntries = new Map();
   let nowMs = 1000;
   let runtime;
   const navigationTarget = {
@@ -95,11 +97,60 @@ function createFixture(options = {}) {
   const relay = options.relay || (async (payload) => {
     relayRequests.push(payload);
     relayedContexts.push({ type: "host.context", ...payload.context });
-    return { ok: true, connected: true, commands: [] };
+    const sessionId = payload.context.session.id;
+    const turnState = payload.context.turn.state;
+    for (const [queueId, entry] of queueEntries) {
+      if (entry.session_id !== sessionId) continue;
+      if (turnState === "running" && entry.status === "submitted") entry.status = "processing";
+      else if (turnState === "idle" && entry.status === "processing") queueEntries.delete(queueId);
+    }
+    return {
+      ok: true,
+      connected: true,
+      commands: [],
+      queue: [...queueEntries.values()]
+        .filter((item) => item.session_id === sessionId)
+        .map(({ text: _text, ...item }) => item),
+    };
+  });
+  const queueRequest = options.queueRequest || (async (operation, payload) => {
+    queueRequests.push({ operation, payload: { ...payload } });
+    if (operation === "enqueue") {
+      const entry = {
+        queue_id: payload.queue_id,
+        action_id: payload.action_id,
+        session_id: payload.session_id,
+        draft_revision: payload.draft_revision,
+        status: "queued",
+        text: payload.text,
+      };
+      queueEntries.set(entry.queue_id, entry);
+      return { ok: true, queue: { ...entry, text: undefined } };
+    }
+    if (operation === "claim") {
+      const entry = queueEntries.get(payload.queue_id);
+      if (!entry) return { ok: false, code: "queue_not_found" };
+      entry.status = "leased";
+      return {
+        ok: true,
+        lease_token: `lease-${entry.queue_id}`,
+        client_submission_id: `voxspark-${entry.action_id}`,
+        text: entry.text,
+        queue: { ...entry, text: undefined },
+      };
+    }
+    if (operation === "complete") {
+      const entry = queueEntries.get(payload.queue_id);
+      if (!entry) return { ok: false, code: "queue_not_found" };
+      entry.status = payload.outcome === "succeeded" ? "submitted" : payload.outcome;
+      return { ok: true, queue: { ...entry, text: undefined } };
+    }
+    return { ok: false, code: "unsupported_queue_operation" };
   });
   runtime = surfaceHost.createVoxSparkSurfaceHostRuntime({
     bridgeUrl: "ws://127.0.0.1:8790/host",
     relay,
+    queueRequest,
     clientId: "surface-test",
     document,
     window,
@@ -125,6 +176,8 @@ function createFixture(options = {}) {
     },
     sendDraft: async (draft) => {
       backgroundSends.push({ ...draft });
+      if (options.sendError) throw options.sendError;
+      if (options.sendSucceeds === false) throw new Error("queue_send_failed");
       return true;
     },
     interruptActiveTurn: async (...args) => { interrupts.push(args); },
@@ -151,6 +204,7 @@ function createFixture(options = {}) {
     interrupts,
     diagnostics,
     relayRequests,
+    queueRequests,
     get composer() { return composer; },
     set composer(value) { composer = String(value || ""); },
     set activeTurnId(value) { activeTurnId = value; },
@@ -471,6 +525,7 @@ test("running Session keeps Queue distinct from Steer and Stop", async () => {
   }));
   fixture.socket.message(message("host.action", {
     action: "queue",
+    action_id: "queue-10",
     context_revision: revision,
     draft_revision: 10,
   }));
@@ -482,9 +537,9 @@ test("running Session keeps Queue distinct from Steer and Stop", async () => {
   fixture.activeTurnId = "";
   fixture.runtime.syncContext();
   await nextTurn();
-  assert.equal(fixture.sends.length, 1);
-  assert.equal(fixture.sends[0].text, "Run this after the current turn.");
-  assert.equal(fixture.runtime.readState().queuedDrafts.length, 0);
+  assert.equal(fixture.backgroundSends.length, 1);
+  assert.equal(fixture.backgroundSends[0].text, "Run this after the current turn.");
+  assert.equal(fixture.runtime.readState().queuedDrafts[0].status, "submitted");
 
   fixture.activeTurnId = "turn-b";
   fixture.runtime.syncContext();
@@ -522,6 +577,7 @@ test("multiple queued drafts require a complete running-to-idle observation betw
     }));
     fixture.socket.message(message("host.action", {
       action: "queue",
+      action_id: `queue-${draftRevision}`,
       context_revision: revision,
       draft_revision: draftRevision,
     }));
@@ -532,15 +588,15 @@ test("multiple queued drafts require a complete running-to-idle observation betw
   fixture.activeTurnId = "";
   fixture.runtime.syncContext();
   await nextTurn();
-  assert.deepEqual(fixture.sends.map((item) => item.text), ["First queued draft"]);
+  assert.deepEqual(fixture.backgroundSends.map((item) => item.text), ["First queued draft"]);
   fixture.runtime.syncContext();
   await nextTurn();
-  assert.deepEqual(fixture.sends.map((item) => item.text), ["First queued draft"]);
+  assert.deepEqual(fixture.backgroundSends.map((item) => item.text), ["First queued draft"]);
 
   fixture.advance(2000);
   fixture.runtime.syncContext();
   await nextTurn();
-  assert.deepEqual(fixture.sends.map((item) => item.text), ["First queued draft"]);
+  assert.deepEqual(fixture.backgroundSends.map((item) => item.text), ["First queued draft"]);
 
   fixture.activeTurnId = "turn-b";
   fixture.runtime.syncContext();
@@ -549,7 +605,7 @@ test("multiple queued drafts require a complete running-to-idle observation betw
   fixture.activeTurnId = "";
   fixture.runtime.syncContext();
   await nextTurn();
-  assert.deepEqual(fixture.sends.map((item) => item.text), ["First queued draft", "Second queued draft"]);
+  assert.deepEqual(fixture.backgroundSends.map((item) => item.text), ["First queued draft", "Second queued draft"]);
 });
 
 test("failed send keeps the owned draft and queued entry available", async () => {
@@ -562,6 +618,7 @@ test("failed send keeps the owned draft and queued entry available", async () =>
   }));
   fixture.socket.message(message("host.action", {
     action: "queue",
+    action_id: "queue-30",
     context_revision: revision,
     draft_revision: 30,
   }));
@@ -571,7 +628,8 @@ test("failed send keeps the owned draft and queued entry available", async () =>
   fixture.runtime.syncContext();
   await nextTurn();
   assert.equal(fixture.runtime.readState().queuedDrafts.length, 1);
-  assert.equal(fixture.composer, "Keep this draft after failure.");
+  assert.equal(fixture.runtime.readState().queuedDrafts[0].status, "failed");
+  assert.equal(fixture.composer, "");
 });
 
 test("failed hardware Send reports failure without automatically sending twice", async () => {
@@ -1024,6 +1082,7 @@ test("Session switch preserves queued VoxSpark drafts without exposing them in t
   }));
   fixture.socket.message(message("host.action", {
     action: "queue",
+    action_id: "queue-12",
     context_revision: revision,
     draft_revision: 12,
   }));
@@ -1031,12 +1090,76 @@ test("Session switch preserves queued VoxSpark drafts without exposing them in t
   assert.equal(fixture.runtime.readState().queuedDrafts.length, 1);
 
   fixture.switchSessionFromNavigation("session-b");
+  await nextTurn();
   const state = fixture.runtime.readState();
   assert.equal(state.currentContext.sessionId, "session-b");
-  assert.equal(state.queuedDrafts.length, 1);
-  assert.equal(state.queuedDrafts[0].sessionId, "session-a");
+  assert.equal(state.queuedDrafts.length, 0);
   assert.equal(state.activeDraft, null);
   assert.ok(fixture.diagnostics.some((item) => item.code === "session_changed_drafts_preserved"));
+  fixture.activeTurnId = "turn-a";
+  fixture.switchSessionFromNavigation("session-a");
+  await nextTurn();
+  assert.equal(fixture.runtime.readState().queuedDrafts[0].sessionId, "session-a");
+});
+
+test("a refreshed browser restores and submits a backend-owned Queue without a local draft", async () => {
+  let queueStatus = "queued";
+  const queueOperations = [];
+  const fixture = createFixture({
+    relay: async (payload) => ({
+      ok: true,
+      connected: true,
+      commands: [],
+      queue: queueStatus ? [{
+        queue_id: "queue-after-refresh",
+        action_id: "queue-after-refresh",
+        session_id: payload.context.session.id,
+        draft_revision: 17,
+        status: queueStatus,
+      }] : [],
+    }),
+    queueRequest: async (operation, payload) => {
+      queueOperations.push({ operation, payload: { ...payload } });
+      if (operation === "claim") {
+        queueStatus = "leased";
+        return {
+          ok: true,
+          lease_token: "lease-after-refresh",
+          client_submission_id: "voxspark-queue-after-refresh",
+          text: "Recovered encrypted Queue body.",
+          queue: {
+            queue_id: "queue-after-refresh",
+            action_id: "queue-after-refresh",
+            session_id: "session-a",
+            draft_revision: 17,
+            status: "leased",
+          },
+        };
+      }
+      if (operation === "complete") {
+        queueStatus = "submitted";
+        return {
+          ok: true,
+          queue: {
+            queue_id: "queue-after-refresh",
+            action_id: "queue-after-refresh",
+            session_id: "session-a",
+            draft_revision: 17,
+            status: "submitted",
+          },
+        };
+      }
+      return { ok: false };
+    },
+  });
+
+  await nextTurn();
+  await nextTurn();
+  assert.equal(fixture.runtime.readState().activeDraft, null);
+  assert.equal(fixture.backgroundSends.length, 1);
+  assert.equal(fixture.backgroundSends[0].text, "Recovered encrypted Queue body.");
+  assert.equal(fixture.backgroundSends[0].clientSubmissionId, "voxspark-queue-after-refresh");
+  assert.deepEqual(queueOperations.map((item) => item.operation), ["claim", "complete"]);
 });
 
 test("a Session switch preserves the original draft and routes its action back to that Session", async () => {
@@ -1099,6 +1222,10 @@ test("queueing a retained Session A draft never clears Session B Composer text",
   }), { sequence: 93 });
 
   assert.equal(fixture.composer, "Shared visible text.");
+  assert.equal(fixture.runtime.readState().queuedDrafts.length, 0);
+  fixture.activeTurnId = "turn-a";
+  fixture.switchSessionFromNavigation("session-a");
+  await nextTurn();
   assert.equal(fixture.runtime.readState().queuedDrafts.length, 1);
   assert.equal(fixture.runtime.readState().queuedDrafts[0].sessionId, "session-a");
 });

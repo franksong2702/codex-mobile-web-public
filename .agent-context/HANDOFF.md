@@ -6906,3 +6906,31 @@ The previous full handoff was archived and should be opened only when old proven
 - A simultaneous Bridge and Mobile crash before Composer confirmation cannot
   recover the in-memory final text. Do not add plaintext recovery storage;
   evaluate an encrypted short-TTL spool as a separate security decision.
+
+## 2026-09-06 - VoxSpark Checkpoint R3A/R3B Queue durability candidate
+
+- Continue from the isolated `voxspark/r1-transaction-integrity` branch. This
+  change is source-only and must not be transplanted to the dirty live checkout
+  without a separate deployment and restart authorization.
+- R3A makes the Mobile backend authoritative for Queue text and lifecycle.
+  Bodies are stored only in an AES-256-GCM envelope with atomic mode-`0600`
+  replacement. The key comes from macOS Keychain service
+  `com.xuefusong.codex-mobile.voxspark-queue`; missing or unauthenticatable
+  storage fails closed and is not overwritten.
+- R3B uses stable Queue/action/submission ids and a client-bound 30-second
+  executor lease. A refreshed browser for the same active Session may claim a
+  queued entry. A stale browser cannot reconcile lifecycle state, and restored
+  `leased` or `submitted` work becomes `unknown` rather than replaying.
+- Queue state is Session-scoped. Only content-free metadata is returned by the
+  context API or forwarded to Bridge/BOX. Successful submission erases the
+  stored body; failure or unknown retains it encrypted for bounded recovery.
+- Validation: focused Queue/Host set `65/65`; complete Codex Mobile
+  `2702/2702`; frontend build and manifest check, `npm run check`,
+  `npm run check:voxspark`, `npm run check:macos`, and `git diff --check` all
+  returned exit 0. Paired VoxSpark full validation passed Node `150/150` and
+  Python `6/6` with project and diff checks.
+- Not performed: Keychain provisioning, listener/Bridge/ChatGPT restart,
+  deployment, BOX flash, Git push, real browser refresh, Mobile restart, or
+  physical BOX acceptance. The next gate must provision the key, deploy both
+  source sides, restart only authorized services, then verify one Queue across
+  browser refresh and one across Mobile restart without duplicate execution.

@@ -113,6 +113,10 @@ const { createServerHttpRuntimeService } = require("./services/runtime/server-ht
 const { createServerRestartDrainService } = require("./services/runtime/server-restart-drain-service");
 const { createVoxSparkSurfaceHostService } = require("./services/runtime/voxspark-surface-host-service");
 const { createVoxSparkSurfaceTransactionStore } = require("./services/runtime/voxspark-surface-transaction-store");
+const {
+  createVoxSparkEncryptedQueueStore,
+  createVoxSparkKeychainQueueKeyProvider,
+} = require("./services/runtime/voxspark-encrypted-queue-store");
 const { createRuntimeSettingsService } = require("./services/runtime/runtime-settings-service");
 const { createThreadRuntimeSettingsService } = require("./services/runtime/thread-runtime-settings-service");
 const { createModelOptionsRuntimeService } = require("./services/runtime/model-options-runtime-service");
@@ -1907,6 +1911,13 @@ const voxsparkSurfaceHostService = createVoxSparkSurfaceHostService({
   polishContextConsent: VOXSPARK_POLISH_CONTEXT_CONSENT,
   transactionStore: createVoxSparkSurfaceTransactionStore({
     filePath: path.join(RUNTIME_ROOT, "voxspark", "surface-transactions.json"),
+  }),
+  queueStore: createVoxSparkEncryptedQueueStore({
+    filePath: path.join(RUNTIME_ROOT, "voxspark", "queued-submissions.enc"),
+    keyProvider: createVoxSparkKeychainQueueKeyProvider({
+      env: process.env,
+      userHome: USER_HOME,
+    }),
   }),
   logger: console,
 });

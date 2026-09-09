@@ -20,6 +20,17 @@ test('login job runs once in the Aqua session and is not a restart loop', () => 
   const source = fs.readFileSync(agentTemplate, 'utf8')
     .replaceAll('__LAUNCHER__', '/tmp/launcher.sh')
     .replaceAll('__LOG_DIR__', '/tmp/logs');
+  assert.match(source, /<key>RunAtLoad<\/key>\s*<true\/>/);
+  assert.match(source, /<string>--login<\/string>/);
+  assert.doesNotMatch(source, /<key>KeepAlive<\/key>/);
+});
+
+test('login plist passes the native macOS validator', {
+  skip: process.platform !== 'darwin' ? 'plutil is a macOS system tool' : false,
+}, () => {
+  const source = fs.readFileSync(agentTemplate, 'utf8')
+    .replaceAll('__LAUNCHER__', '/tmp/launcher.sh')
+    .replaceAll('__LOG_DIR__', '/tmp/logs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-shared-'));
   try {
     const plist = path.join(dir, 'agent.plist');
@@ -28,9 +39,6 @@ test('login job runs once in the Aqua session and is not a restart loop', () => 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
-  assert.match(source, /<key>RunAtLoad<\/key>\s*<true\/>/);
-  assert.match(source, /<string>--login<\/string>/);
-  assert.doesNotMatch(source, /<key>KeepAlive<\/key>/);
 });
 
 test('launcher app uses the ChatGPT icon and a distinct identity', () => {

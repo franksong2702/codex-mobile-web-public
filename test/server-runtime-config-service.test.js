@@ -71,6 +71,8 @@ test("server runtime config resolves default runtime paths and bounded ids", () 
   assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_ROLE, "plugin_worker");
   assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE, "");
   assert.equal(config.USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS, 60 * 60 * 1000);
+  assert.equal(config.VOXSPARK_BRIDGE_URL, "");
+  assert.equal(config.VOXSPARK_POLISH_CONTEXT_CONSENT, "");
 });
 
 test("server runtime config applies env overrides and clamps hot-path limits", () => {
@@ -102,6 +104,8 @@ test("server runtime config applies env overrides and clamps hot-path limits", (
       CODEX_MOBILE_USER_BEHAVIOR_REPAIR_TARGET_ROLE: "plugin_worker",
       CODEX_MOBILE_USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE: "/repo/codex-mobile-web",
       CODEX_MOBILE_USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS: "120000",
+      CODEX_MOBILE_VOXSPARK_BRIDGE_URL: "ws://127.0.0.1:8790/host",
+      CODEX_MOBILE_VOXSPARK_POLISH_CONTEXT: "bounded-context-v1",
     },
     codexHome: "/codex/home",
   });
@@ -133,6 +137,8 @@ test("server runtime config applies env overrides and clamps hot-path limits", (
   assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_ROLE, "plugin_worker");
   assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE, "/repo/codex-mobile-web");
   assert.equal(config.USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS, 120000);
+  assert.equal(config.VOXSPARK_BRIDGE_URL, "ws://127.0.0.1:8790/host");
+  assert.equal(config.VOXSPARK_POLISH_CONTEXT_CONSENT, "bounded-context-v1");
 });
 
 test("server runtime config keeps duplicate desktop global state files unique", () => {

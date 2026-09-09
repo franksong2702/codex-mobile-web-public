@@ -1712,6 +1712,8 @@ test("Vite shell entry imports the asset-graph ESM compatibility module", async 
     "media-preview-runtime",
     "composer-runtime",
     "composer-bridge-runtime",
+    "voxspark-surface-host-runtime",
+    "voxspark-lexicon-runtime",
     "api-client-runtime",
     "thread-list-load-policy",
     "thread-list-stable-order",
@@ -2083,8 +2085,8 @@ test("Vite shell build contract records entry chunks and classic fallback output
     VITE_ESM_COMPATIBILITY_MODULES.length
   );
   assert.equal(contract.esmCompatibility.moduleCount, VITE_ESM_COMPATIBILITY_MODULES.length);
-  assert.equal(contract.esmCompatibility.nativeEsmModuleCount, 49);
-  assert.equal(contract.esmCompatibility.classicGlobalCompatibilityModuleCount, VITE_ESM_COMPATIBILITY_MODULES.length - 49);
+  assert.equal(contract.esmCompatibility.nativeEsmModuleCount, 51);
+  assert.equal(contract.esmCompatibility.classicGlobalCompatibilityModuleCount, VITE_ESM_COMPATIBILITY_MODULES.length - 51);
   assert.equal(contract.esmCompatibility.hashCount, VITE_ESM_COMPATIBILITY_MODULES.length);
   assert.equal(
     contract.esmCompatibility.expectedFunctionCount,
@@ -2274,6 +2276,16 @@ test("Vite shell build contract records entry chunks and classic fallback output
         id: "composer-bridge-runtime",
         nativeSource: "frontend/native/composer-bridge-runtime.mjs",
         importSource: "frontend/native/composer-bridge-runtime.mjs",
+      },
+      {
+        id: "voxspark-surface-host-runtime",
+        nativeSource: "frontend/native/voxspark-surface-host-runtime.mjs",
+        importSource: "frontend/native/voxspark-surface-host-runtime.mjs",
+      },
+      {
+        id: "voxspark-lexicon-runtime",
+        nativeSource: "frontend/native/voxspark-lexicon-runtime.mjs",
+        importSource: "frontend/native/voxspark-lexicon-runtime.mjs",
       },
       {
         id: "api-client-runtime",

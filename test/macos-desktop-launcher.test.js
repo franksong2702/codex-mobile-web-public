@@ -30,7 +30,7 @@ function printLaunchEnvironment(args) {
     "--node",
     "/bin/sh",
     "--mux-wrapper",
-    "/bin/echo",
+    path.join(root, "codex-app-server-mux-macos.sh"),
     ...args,
   ], {
     cwd: root,
@@ -80,6 +80,15 @@ test("macOS desktop launcher running detection uses the resolved executable path
   assert.doesNotMatch(launcher, /pgrep -f "\/Contents\/MacOS\/Codex"/);
 });
 
+test("macOS desktop launcher exposes the mux as a PATH-resolved command name", () => {
+  assert.match(launcher, /MUX_WRAPPER_COMMAND="\$\(basename "\$MUX_WRAPPER"\)"/);
+  assert.match(launcher, /export CODEX_CLI_PATH="\$MUX_WRAPPER_COMMAND"/);
+  assert.match(launcher, /LAUNCH_PATH="\$MUX_WRAPPER_DIR:/);
+  assert.match(launcher, /--env "PATH=\$LAUNCH_PATH"/);
+  assert.match(launcher, /--env "CODEX_CLI_PATH=\$CODEX_CLI_PATH"/);
+  assert.doesNotMatch(launcher, /CODEX_APP_SERVER_USE_LOCAL_DAEMON/);
+});
+
 test("macOS desktop launcher print-only resolves ChatGPT app executable", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-chatgpt-app-"));
   try {
@@ -88,6 +97,8 @@ test("macOS desktop launcher print-only resolves ChatGPT app executable", () => 
     assert.match(output, new RegExp(`Desktop app: ${appPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(output, new RegExp(`Desktop app name: ChatGPT`));
     assert.match(output, new RegExp(`Desktop executable: ${exePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(output, /CODEX_CLI_PATH=codex-app-server-mux-macos\.sh/);
+    assert.match(output, new RegExp(`CODEX_CLI_RESOLVED_PATH=${path.join(root, "codex-app-server-mux-macos.sh").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

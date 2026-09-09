@@ -451,6 +451,7 @@ function wireUi() {
   if (pageRefreshPrompt) pageRefreshPrompt.addEventListener("click", refreshPageForNewBuild);
   $("composer").addEventListener("submit", sendMessage);
   const sendButton = $("sendMessage");
+  sendButton.addEventListener("pointerup", requestComposerSubmitFromButton);
   sendButton.addEventListener("click", requestComposerSubmitFromButton);
   $("interruptTurn").addEventListener("click", interruptActiveTurn);
   if ($("scrollToBottom")) $("scrollToBottom").addEventListener("click", () => {
@@ -789,13 +790,19 @@ function wireUi() {
   window.addEventListener("pagehide", saveCurrentDraftNow);
   window.addEventListener("beforeunload", saveCurrentDraftNow);
   document.addEventListener("focusin", () => {
+    updateViewportVars();
+    updateComposerHeightVar();
     if (!isHermesKeyboardInputActive()) {
       scheduleVisualRecovery("focusin", 40, { render: false, heavy: false, delays: [40, 180] });
     }
     scheduleVisibleImageFailureScan([0, 80, 240]);
     cleanupExternalMermaidErrorArtifacts();
   });
-  document.addEventListener("focusout", () => scheduleVisualRecovery("focusout", 160, { render: false, heavy: false, delays: [160, 420] }));
+  document.addEventListener("focusout", () => {
+    updateViewportVars();
+    updateComposerHeightVar();
+    scheduleVisualRecovery("focusout", 160, { render: false, heavy: false, delays: [160, 420] });
+  });
   window.addEventListener("orientationchange", () => {
     followViewportChangeToBottom("orientation");
     scheduleMobileResume("orientation", 250);
@@ -879,6 +886,18 @@ async function start() {
     return;
   }
   applyFrontendDiagnosticLogPublicConfig(config);
+  if (
+    config.voxspark
+    && config.voxspark.enabled
+    && window.voxsparkSurfaceHostRuntime
+  ) {
+    if (typeof window.voxsparkSurfaceHostRuntime.configurePolishContextConsent === "function") {
+      window.voxsparkSurfaceHostRuntime.configurePolishContextConsent(config.voxspark.polishContextConsent);
+    }
+    if (!window.voxsparkSurfaceHostRuntime.readState().enabled) {
+      window.voxsparkSurfaceHostRuntime.configureBridgeUrl(config.voxspark.bridgeUrl);
+    }
+  }
   initializePageBuildState(config);
   startPageRefreshChecks();
   state.appVersion = String(config.version || "");

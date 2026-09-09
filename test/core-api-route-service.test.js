@@ -127,6 +127,9 @@ test("core public config route uses injected runtime dependencies", async () => 
       scheduled.push(fn);
     },
     threadListFallbackPrewarmPublicStatus: () => ({ pending: false }),
+    voxsparkSurfaceHostService: {
+      publicConfig: () => ({ enabled: true, bridgeUrl: "ws://127.0.0.1:8790/host" }),
+    },
     workspaceDelegationPublicSettings: () => ({ enabled: true }),
     workspaceRegistryService: {
       createRoots: () => ["/workspace"],
@@ -166,6 +169,10 @@ test("core public config route uses injected runtime dependencies", async () => 
   assert.equal(sent.body.frontendDiagnosticLog.enabled, true);
   assert.deepEqual(sent.body.frontendDiagnosticLog.scopes, ["submitted_echo"]);
   assert.equal(sent.body.threadListFallbackPrewarm.pending, false);
+  assert.deepEqual(sent.body.voxspark, {
+    enabled: true,
+    bridgeUrl: "ws://127.0.0.1:8790/host",
+  });
 });
 
 test("core settings route persists frontend diagnostic log settings", async () => {

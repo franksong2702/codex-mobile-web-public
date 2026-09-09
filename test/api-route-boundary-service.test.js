@@ -64,6 +64,7 @@ test("server route composition wires core route service into API dispatch", () =
   const calls = [];
   const coreApiRouteService = { core: true };
   const runtimePressureDiagnostics = { status: () => ({ ok: true }) };
+  const visibleWorkspaceRoots = () => new Set(["/workspace"]);
   const frontendDiagnosticLogPublicSettings = () => ({ enabled: true });
   const setFrontendDiagnosticLogSettings = () => ({ enabled: true });
   const service = createServerRouteCompositionService({
@@ -71,6 +72,7 @@ test("server route composition wires core route service into API dispatch", () =
     runtimePressureDiagnostics,
     frontendDiagnosticLogPublicSettings,
     setFrontendDiagnosticLogSettings,
+    visibleWorkspaceRoots,
     coreApiRouteServiceFactory: (deps) => {
       calls.push([
         "core",
@@ -86,6 +88,7 @@ test("server route composition wires core route service into API dispatch", () =
         "dispatch",
         deps.coreApiRouteService === coreApiRouteService,
         deps.runtimePressureDiagnostics === runtimePressureDiagnostics,
+        deps.visibleWorkspaceRoots === visibleWorkspaceRoots,
       ]);
       return {
         handleApi() {},
@@ -97,7 +100,7 @@ test("server route composition wires core route service into API dispatch", () =
   assert.equal(service.coreApiRouteService, coreApiRouteService);
   assert.deepEqual(calls, [
     ["core", "0.1-test", true, true, true],
-    ["dispatch", true, true],
+    ["dispatch", true, true, true],
   ]);
 });
 
@@ -231,6 +234,25 @@ test("workspace route reconciles selector rows with shared workspace snapshot", 
     ["/Users/me/hermes-webui", "codex"],
     ["/Users/me/Documents/Codex/investing", "mobile"],
   ]);
+});
+
+test("workspace route includes Desktop roots even when the recent-thread projection is incomplete", async () => {
+  const sent = [];
+  const desktopWorkspace = "/Users/me/hermes-webui";
+  const service = createWorkspaceRouteService({
+    listWorkspaces: async () => [],
+    readGlobalState: () => ({ "electron-saved-workspace-roots": [desktopWorkspace] }),
+    visibleWorkspaceRoots: (state) => new Set(state["electron-saved-workspace-roots"]),
+    normalizeFsPath: (value) => String(value || "").replace(/\/+$/, "").toLowerCase(),
+  });
+
+  await service.handleRoute({
+    url: routeUrl("/api/workspaces"),
+    method: "GET",
+    sendJson: (status, body) => sent.push({ status, body }),
+  });
+
+  assert.deepEqual(sent[0].body.data.map((row) => [row.cwd, row.source]), [[desktopWorkspace, "codex"]]);
 });
 
 test("workspace route exposes Windows desktop workspace rows for RMW selector", async () => {

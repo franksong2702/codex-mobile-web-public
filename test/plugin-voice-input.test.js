@@ -235,8 +235,9 @@ test("send button voice gesture is disabled while direct send remains isolated",
   assert.doesNotMatch(appJs, /sendButton\.addEventListener\("pointerup", handlePluginVoiceInputSendPointerUp\)/);
   assert.doesNotMatch(appJs, /sendButton\.addEventListener\("pointercancel", handlePluginVoiceInputSendPointerCancel\)/);
   assert.doesNotMatch(appJs, /sendButton\.addEventListener\("click", handlePluginVoiceInputSendClick\)/);
-  assert.doesNotMatch(appJs, /sendButton\.addEventListener\("pointerup", requestComposerSubmitFromButton\)/);
+  assert.match(appJs, /sendButton\.addEventListener\("pointerup", requestComposerSubmitFromButton\)/);
   assert.match(appJs, /sendButton\.addEventListener\("click", requestComposerSubmitFromButton\)/);
+  assert.match(composerRuntimeBody("requestComposerSubmitFromButton"), /now - state\.lastSendButtonSubmitAt < 650/);
 });
 
 test("embedded active-turn stop button is not rendered as selectable text", () => {

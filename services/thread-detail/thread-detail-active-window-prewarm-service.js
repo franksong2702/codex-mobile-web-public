@@ -57,6 +57,7 @@ function boundedMaxRolloutBytes(value, fallback) {
 function createThreadDetailActiveWindowPrewarmService(options = {}) {
   const now = typeof options.now === "function" ? options.now : () => Date.now();
   const scheduleTimer = typeof options.setTimeout === "function" ? options.setTimeout : setTimeout;
+  const cancelTimer = typeof options.clearTimeout === "function" ? options.clearTimeout : clearTimeout;
   const delayMs = Math.max(0, Number(options.delayMs ?? 25));
   const minIntervalMs = Math.max(0, Number(options.minIntervalMs ?? 1000));
   const readyResultTtlMs = Math.max(0, Number(options.readyResultTtlMs ?? 15000));
@@ -187,7 +188,7 @@ function createThreadDetailActiveWindowPrewarmService(options = {}) {
 
   function finish(threadId, result, jobId = 0) {
     const current = pending.get(threadId);
-    if (!current || current.jobId === jobId) {
+    if (current && current.jobId === jobId) {
       pending.delete(threadId);
       lastResultByThread.set(threadId, Object.assign({ updatedAtMs: now() }, result || {}));
     }
@@ -218,6 +219,8 @@ function createThreadDetailActiveWindowPrewarmService(options = {}) {
     lastAttemptAtByThread.set(threadId, current);
     const jobId = ++nextJobId;
     const job = Object.assign({}, input, { threadId, jobId });
+    const previous = pending.get(threadId);
+    if (previous && previous.timer) cancelTimer(previous.timer);
     pending.set(threadId, {
       scheduledAtMs: current,
       reason: boundedReason(input.reason),
@@ -226,6 +229,8 @@ function createThreadDetailActiveWindowPrewarmService(options = {}) {
     });
     const jobDelayMs = boundedDelayMs(input.delayMs, delayMs);
     const timer = scheduleTimer(() => {
+      const current = pending.get(threadId);
+      if (!current || current.jobId !== jobId) return;
       prewarmNow(job)
         .then((result) => {
           finish(threadId, result, jobId);
@@ -237,6 +242,8 @@ function createThreadDetailActiveWindowPrewarmService(options = {}) {
           log("active_window_prewarm_failed", { threadId, trigger: boundedReason(job.reason), reason: result.reason });
         });
     }, jobDelayMs);
+    const currentJob = pending.get(threadId);
+    if (currentJob && currentJob.jobId === jobId) currentJob.timer = timer;
     if (timer && typeof timer.unref === "function") timer.unref();
     return withThreadDetailActiveWindowPrewarmJobPolicy({ scheduled: true, reason: "scheduled" });
   }

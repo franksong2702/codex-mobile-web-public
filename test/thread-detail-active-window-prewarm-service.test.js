@@ -245,6 +245,45 @@ test("schedule deduplicates pending work", () => {
   assert.equal(calls.length, 1);
 });
 
+test("superseded active-window timer cannot read after its replacement has finished", async () => {
+  const timers = [];
+  let reads = 0;
+  const service = createThreadDetailActiveWindowPrewarmService({
+    minIntervalMs: 0,
+    setTimeout(fn) { timers.push(fn); return { unref() {} }; },
+    async resolveSummary() { reads++; return { summary: { status: "idle" } }; },
+  });
+  service.schedule({ threadId: "a" });
+  service.schedule({ threadId: "a", preemptPending: true, bypassMinInterval: true });
+  timers[1]();
+  await new Promise((resolve) => setImmediate(resolve));
+  timers[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, 1);
+  assert.equal(service.status("a").pending, false);
+});
+
+test("obsolete in-flight active-window result cannot overwrite a newer completed result", async () => {
+  const timers = [];
+  const reads = [];
+  const service = createThreadDetailActiveWindowPrewarmService({
+    minIntervalMs: 0,
+    setTimeout(fn) { timers.push(fn); return { unref() {} }; },
+    resolveSummary() { return new Promise((resolve) => reads.push(resolve)); },
+  });
+  service.schedule({ threadId: "a" });
+  timers[0]();
+  service.schedule({ threadId: "a", preemptPending: true, bypassMinInterval: true });
+  timers[1]();
+  reads[1]({ summary: { status: "active", activeTurnId: "turn-new" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const current = service.status("a").lastResult;
+  assert.equal(current.reason, "projection-input-unavailable");
+  reads[0]({ summary: { status: "idle" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(service.status("a").lastResult, current);
+});
+
 test("schedule lets notification prewarm preempt older pending work", () => {
   const timers = [];
   const service = createThreadDetailActiveWindowPrewarmService({

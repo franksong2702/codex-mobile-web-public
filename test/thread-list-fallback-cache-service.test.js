@@ -179,6 +179,22 @@ test("readCachedFallback returns only warm cache and never builds cold baseline"
   assert.deepEqual(calls, { stateDb: 1, rollout: 1, sessionIndex: 1 });
 });
 
+test("forced baseline bypasses a warm cache for explicit workspace history", () => {
+  const { calls, service } = createService();
+  service.readFallback(10);
+  const diagnostics = {};
+  const rows = service.readFallback(10, {
+    forceBaseline: true,
+    forceSourceSnapshot: true,
+    diagnostics,
+  });
+
+  assert.deepEqual(rows.map((thread) => thread.id), ["thread-session", "thread-rollout", "thread-state"]);
+  assert.deepEqual(calls, { stateDb: 2, rollout: 2, sessionIndex: 2 });
+  assert.equal(diagnostics.cacheHit, false);
+  assert.equal(diagnostics.cacheDecision, "forced-baseline-rebuild");
+});
+
 test("fallback cache stores only summary-safe rows in memory", () => {
   const { service } = createService({
     readStateDbFallback: () => [{

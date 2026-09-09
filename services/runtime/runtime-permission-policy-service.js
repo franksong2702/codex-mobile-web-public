@@ -263,6 +263,7 @@ function createRuntimePermissionPolicyService(dependencies = {}) {
       next.sandboxPolicy = workspaceWriteSandboxPolicy(cwd, next.sandboxPolicy);
       next.sandboxMode = "workspace-write";
       next.permissionProfile = null;
+      next.permissionProfileId = "";
       return next;
     }
     if (normalized === "auto") {
@@ -271,6 +272,7 @@ function createRuntimePermissionPolicyService(dependencies = {}) {
       next.sandboxPolicy = workspaceWriteSandboxPolicy(cwd, next.sandboxPolicy);
       next.sandboxMode = "workspace-write";
       next.permissionProfile = null;
+      next.permissionProfileId = "";
       return next;
     }
     if (normalized === "full") {
@@ -278,6 +280,7 @@ function createRuntimePermissionPolicyService(dependencies = {}) {
       next.sandboxPolicy = { type: "dangerFullAccess" };
       next.sandboxMode = "danger-full-access";
       next.permissionProfile = null;
+      next.permissionProfileId = "";
       return next;
     }
     if (normalized === "custom") {
@@ -291,16 +294,19 @@ function createRuntimePermissionPolicyService(dependencies = {}) {
         next.sandboxPolicy = { type: "dangerFullAccess" };
         next.sandboxMode = "danger-full-access";
         next.permissionProfile = null;
+        next.permissionProfileId = "";
       } else if (sandboxType === "readOnly") {
         next.approvalPolicy = approvalPolicy || "on-request";
         next.sandboxPolicy = readOnlySandboxPolicy(next.sandboxPolicy);
         next.sandboxMode = "read-only";
         next.permissionProfile = null;
+        next.permissionProfileId = "";
       } else if (sandboxType === "workspaceWrite") {
         next.approvalPolicy = approvalPolicy || "on-request";
         next.sandboxPolicy = workspaceWriteSandboxPolicy(cwd, next.sandboxPolicy);
         next.sandboxMode = "workspace-write";
         next.permissionProfile = null;
+        next.permissionProfileId = "";
       }
       return next;
     }

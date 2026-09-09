@@ -21,6 +21,9 @@ const {
 const {
   createWorkspaceRouteService,
 } = require("./workspace-route-service");
+const {
+  createVoxSparkSurfaceHostRouteService,
+} = require("./voxspark-surface-host-route-service");
 
 function createApiDispatchRouteService(dependencies = {}) {
   const READ_RPC_TIMEOUT_MS = dependencies.READ_RPC_TIMEOUT_MS;
@@ -117,9 +120,14 @@ function createApiDispatchRouteService(dependencies = {}) {
     listWorkspaces,
     normalizeFsPath,
     tokenUsageWorkspaceCwds,
+    readGlobalState,
+    visibleWorkspaceRoots: dependencies.visibleWorkspaceRoots,
     workspaceRegistryService,
     syncRegisteredWorkspaceTrust,
     syncKnownCodexMobileMcpToolsets,
+  });
+  const voxsparkSurfaceHostRouteService = createVoxSparkSurfaceHostRouteService({
+    service: dependencies.voxsparkSurfaceHostService,
   });
   const threadContinuationRouteService = createThreadContinuationRouteService({
     createContinuationJob,
@@ -209,6 +217,13 @@ function createApiDispatchRouteService(dependencies = {}) {
       trackedSendJson(401, { error: "Unauthorized" });
       return;
     }
+    const voxsparkSurfaceHostRouteResult = await voxsparkSurfaceHostRouteService.handleRoute({
+      url,
+      method: req.method,
+      readBody: () => readBody(req),
+      sendJson: trackedSendJson,
+    });
+    if (voxsparkSurfaceHostRouteResult.handled) return;
     const authorizedCoreRouteResult = await coreApiRouteService.handleAuthorizedRoute({
       url,
       req,

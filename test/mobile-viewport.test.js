@@ -236,6 +236,10 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(viewportMetricsJs, /hostViewportHeight/);
   assert.match(viewportMetricsJs, /offsetKeyboardShifted/);
   assert.match(viewportMetricsJs, /scrollKeyboardShifted/);
+  assert.match(viewportMetricsJs, /standaloneMobilePwa/);
+  assert.match(viewportMetricsJs, /composerInputActive/);
+  assert.match(viewportMetricsJs, /visualViewportAvailable/);
+  assert.match(viewportMetricsJs, /keyboardOverlay/);
   assert.match(appJs, /hostViewportHeight:\s*embedded && hostViewport && hostViewport\.viewport \? hostViewport\.viewport\.height : 0/);
   assert.match(appJs, /scrollTop:\s*embedded \? Math\.max\(/);
   assert.match(appJs, /function resetMobileKeyboardWindowScroll\(\)/);
@@ -244,7 +248,8 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(appJs, /if \(viewport\.keyboardShrunk\) \{[\s\S]*--app-height/);
   assert.match(appJs, /--app-top/);
   assert.match(appJs, /document\.documentElement\.style\.removeProperty\("--app-height"\)/);
-  assert.match(appJs, /document\.documentElement\.classList\.toggle\("keyboard-open", viewport\.keyboardShrunk\)/);
+  assert.match(appJs, /const keyboardOpen = Boolean\(viewport\.keyboardShrunk \|\| viewport\.keyboardOverlay\)/);
+  assert.match(appJs, /document\.documentElement\.classList\.toggle\("keyboard-open", keyboardOpen\)/);
   assert.match(appJs, /pluginHostViewport: null/);
   assert.match(appJs, /function normalizeHermesPluginViewportRect\(rect\)/);
   assert.match(appJs, /function normalizeHermesPluginViewportMessage\(data\)/);
@@ -254,6 +259,16 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(appJs, /handleHermesPluginViewportMessage\(event && event\.data\)/);
   assert.match(appJs, /state\.pluginHostViewport = normalized;[\s\S]*syncThreadDetailLayoutState\(\);/);
   assert.match(appJs, /function isHermesKeyboardInputActive\(\) \{[\s\S]*isHermesEmbedMode\(\)[\s\S]*isKeyboardEditableElement\(document\.activeElement\)/);
+  assert.match(settingsRuntimeJs, /function isStandaloneMobilePwa\(\)/);
+  assert.match(settingsRuntimeJs, /standaloneMobilePwa:\s*isStandaloneMobilePwa\(\)/);
+  assert.match(settingsRuntimeJs, /composerInputActive:\s*document\.activeElement === \$\("messageInput"\)/);
+  assert.match(settingsRuntimeJs, /function applyStandaloneOverlayComposerLayout\(viewport\)/);
+  assert.match(settingsRuntimeJs, /composer\.style\.position = "fixed"/);
+  assert.match(settingsRuntimeJs, /composer\.style\.top = "env\(safe-area-inset-top, 0px\)"/);
+  assert.match(settingsRuntimeJs, /keyboardOverlay/);
+  assert.match(appShellRuntimeJs, /document\.addEventListener\("focusin", \(\) => \{[\s\S]*updateViewportVars\(\);/);
+  assert.match(appShellRuntimeJs, /document\.addEventListener\("focusout", \(\) => \{[\s\S]*updateViewportVars\(\);/);
+  assert.doesNotMatch(appShellRuntimeJs, /composer_visual_diagnostic/);
   assert.match(appJs, /window\.visualViewport\.addEventListener\("resize", \(\) => \{[\s\S]*if \(!isHermesKeyboardInputActive\(\)\) \{[\s\S]*scheduleVisualRecovery\("visual-viewport"/);
   assert.match(appJs, /window\.visualViewport\.addEventListener\("scroll", \(\) => \{[\s\S]*if \(!isHermesKeyboardInputActive\(\)\) \{[\s\S]*scheduleVisualRecovery\("visual-viewport-scroll"/);
   assert.match(appJs, /HEAVY_VISUAL_RECOVERY_MIN_INTERVAL_MS = 4000/);
@@ -269,6 +284,7 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(stylesCss, /body\s*{[\s\S]*min-height:\s*-webkit-fill-available;/);
   assert.match(stylesCss, /html\.embed-hermes \.app\s*{[\s\S]*height:\s*var\(--app-height, 100dvh\);/);
   assert.match(stylesCss, /html\.embed-hermes \.app\s*{[\s\S]*min-height:\s*0;/);
+  assert.match(stylesCss, /html\.keyboard-open:not\(\.embed-hermes\) \.app\s*{[\s\S]*min-height:\s*0;/);
   assert.match(stylesCss, /html\.embed-hermes \.app\s*{[\s\S]*transform:\s*translateY\(var\(--app-top, 0px\)\);/);
   assert.match(stylesCss, /\.app\.resume-repaint\s*{[\s\S]*transform:\s*translateY\(var\(--app-top, 0px\)\) translateZ\(0\);/);
   assert.match(stylesCss, /--host-top-safe-area:\s*0px;/);
@@ -1029,7 +1045,10 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(threadListRuntimeJs, /data-workspace-token-usage-toggle>统计<\/button>/);
   assert.match(appJs, /function formatTokenMillion\(value\)/);
   assert.match(appJs, /(?:const|var) THREAD_LIST_PAGE_LIMIT = 200;/);
-  assert.match(threadListRuntimeJs, /new URLSearchParams\(\{ limit: String\(THREAD_LIST_PAGE_LIMIT\), archived: "false" \}\)/);
+  assert.match(threadListRuntimeJs, /const pageLimit = state\.selectedCwd \? Math\.min\(80, Number\(THREAD_LIST_PAGE_LIMIT\) \|\| 80\) : THREAD_LIST_PAGE_LIMIT;/);
+  assert.match(threadListRuntimeJs, /new URLSearchParams\(\{ limit: String\(pageLimit\), archived: "false" \}\)/);
+  assert.match(threadListRuntimeJs, /params\.set\("history", "workspace"\)/);
+  assert.match(threadListRuntimeJs, /if \(options\.cursor\) params\.set\("cursor", String\(options\.cursor\)\)/);
   assert.match(threadListRuntimeJs, /function hasThreadDetailRequestInFlight\(\)/);
   assert.match(threadListRuntimeJs, /state\.threadLoadController[\s\S]*state\.refreshThreadController[\s\S]*state\.currentThread && state\.currentThread\.mobileLoading/);
   assert.match(threadListRuntimeJs, /const threadDetailOpening = hasThreadDetailRequestInFlight\(\);/);

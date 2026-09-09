@@ -5,12 +5,53 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const {
+  createThreadVisibilityService,
+} = require("../adapters/thread-visibility-service");
 
 const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
 const serverRuntimeConfigServiceJs = fs.readFileSync(
   path.resolve(__dirname, "..", "services", "runtime", "server-runtime-config-service.js"),
   "utf8",
 );
+
+test("workspace visibility ignores opaque project-order ids while retaining Desktop path roots", () => {
+  const desktopRoot = "/Users/me/hermes-webui";
+  const windowsRoot = "C:\\Users\\me\\Documents\\Codex";
+  const service = createThreadVisibilityService({
+    readGlobalState: () => ({
+      "active-workspace-roots": [desktopRoot],
+      "electron-saved-workspace-roots": [windowsRoot],
+      "project-order": ["project-opaque-id", desktopRoot],
+    }),
+    workspaceRegistryService: { list: () => [] },
+  });
+
+  assert.deepEqual([...service.visibleWorkspaceRoots()], [desktopRoot, windowsRoot]);
+});
+
+test("workspace visibility treats symlink and physical cwd aliases as one workspace", (t) => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mobile-workspace-alias-"));
+  const physicalRoot = path.join(sandbox, "physical-workspace");
+  const workspaceAlias = path.join(sandbox, "workspace-alias");
+  fs.mkdirSync(physicalRoot);
+  fs.symlinkSync(physicalRoot, workspaceAlias, process.platform === "win32" ? "junction" : "dir");
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+  const globalState = {
+    "active-workspace-roots": [workspaceAlias],
+    "electron-saved-workspace-roots": [],
+    "project-order": [],
+  };
+  const service = createThreadVisibilityService({
+    readGlobalState: () => globalState,
+    workspaceRegistryService: { list: () => [] },
+  });
+  const visibility = service.visibilityFromGlobalState(globalState);
+
+  assert.equal(service.threadWorkspaceVisible(physicalRoot, visibility), true);
+  assert.equal(service.threadMatchesWorkspaceCwd(physicalRoot, workspaceAlias), true);
+});
 const serverHttpRuntimeServiceJs = fs.readFileSync(
   path.resolve(__dirname, "..", "services", "runtime", "server-http-runtime-service.js"),
   "utf8",

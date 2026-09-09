@@ -141,6 +141,25 @@ test("thread-list route service marks early workspace visibility responses as ha
   assert.deepEqual(responses, [{ status: 200, body: { data: [] } }]);
 });
 
+test("workspace history bypasses warm cache and returns cursor pages from the persistence baseline", async () => {
+  const cachedThreads = Array.from({ length: 5 }, (_, index) => makeThread(`history-${index}`));
+  const harness = makeThreadListRouteHarness({
+    url: "http://127.0.0.1/api/threads?cwd=/Users/hermes-dev/HermesMobileDev/Movie&history=workspace&limit=2",
+    cachedThreads,
+  });
+
+  const result = await handleThreadListRoute(harness.options);
+
+  assert.deepEqual(result, { handled: true });
+  assert.equal(harness.codexCallCount(), 0);
+  assert.equal(harness.fallbackReadCount(), 1);
+  assert.deepEqual(harness.responses[0].body.data.map((thread) => thread.id), ["history-0", "history-1"]);
+  assert.equal(harness.responses[0].body.nextCursor, "2");
+  assert.equal(harness.responses[0].body.mobileWorkspaceHistory, true);
+  assert.equal(harness.responses[0].body.mobileDiagnostics.threadListTimings.workspaceHistory, true);
+  assert.equal(harness.responses[0].body.mobileDiagnostics.threadListTimings.appServerDeferredReason, "workspace-history-persistence");
+});
+
 test("thread-list route continues to app-server when default warm fallback has an incomplete requested window", async () => {
   const movieThread = makeThread(
     "019efca1-ea69-7292-87b7-025ba023ca87",

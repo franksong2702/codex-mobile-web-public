@@ -166,6 +166,10 @@ async function handleThreadListRoute(options = {}) {
   const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || "80")));
   const cursor = url.searchParams.get("cursor") || null;
   const searchTerm = url.searchParams.get("search") || null;
+  const workspaceHistory = Boolean(cwd) && url.searchParams.get("history") === "workspace";
+  const workspaceHistoryOffset = workspaceHistory && /^\d+$/.test(String(cursor || ""))
+    ? Math.min(100000, Number(cursor))
+    : 0;
   const fallbackMode = String(url.searchParams.get("fallback") || "").trim().toLowerCase();
   const deferFallback = fallbackMode === "defer" && !cursor && !archived && !searchTerm;
   const initialMode = String(url.searchParams.get("initial") || "").trim().toLowerCase();
@@ -208,6 +212,79 @@ async function handleThreadListRoute(options = {}) {
       threadListCoalescing.fail(err);
     }
   };
+  if (workspaceHistory) {
+    try {
+      // Workspace history is an explicit user navigation path.  It must read a
+      // fresh persistence baseline rather than reuse the short default-list
+      // cache, otherwise older sessions disappear behind a warm cache entry.
+      // Read a complete bounded summary window before paging.  Passing only
+      // `offset + limit` into the global State DB reader can omit an older
+      // workspace when recent sessions from other workspaces fill that window.
+      const historyReadLimit = 1000;
+      const fallbackStartedAtMs = Date.now();
+      const fallbackDiagnostics = {};
+      const historyMergeOptions = getMergeThreadSummaryListOptions();
+      const historyRows = readThreadListFallback(historyReadLimit, {
+        cwd,
+        searchTerm,
+        globalState,
+        diagnostics: fallbackDiagnostics,
+        archivedIds: historyMergeOptions.archivedIds,
+        mergeThreadSummaryListOptions: historyMergeOptions,
+        forceBaseline: true,
+        forceSourceSnapshot: true,
+        sourceSnapshotLimit: historyReadLimit,
+      });
+      markTiming("fallbackMs", fallbackStartedAtMs);
+      const page = historyRows.slice(workspaceHistoryOffset, workspaceHistoryOffset + limit);
+      const nextCursor = historyRows.length > workspaceHistoryOffset + page.length
+        ? String(workspaceHistoryOffset + page.length)
+        : null;
+      Object.assign(timings, {
+        appServerMs: 0,
+        appServerDeferred: true,
+        appServerDeferredReason: "workspace-history-persistence",
+        fallbackCacheHit: false,
+        fallbackCacheDecision: String(fallbackDiagnostics.cacheDecision || "forced-baseline-rebuild"),
+        fallbackStateDbMs: Number(fallbackDiagnostics.stateDbMs || 0),
+        fallbackRolloutMs: Number(fallbackDiagnostics.rolloutMs || 0),
+        fallbackSessionIndexMs: Number(fallbackDiagnostics.sessionIndexMs || 0),
+        fallbackStateDbCount: Number(fallbackDiagnostics.stateDbCount || 0),
+        fallbackRolloutCount: Number(fallbackDiagnostics.rolloutCount || 0),
+        fallbackSessionIndexCount: Number(fallbackDiagnostics.sessionIndexCount || 0),
+        fallbackBaselineSourceCount: Number(fallbackDiagnostics.baselineSourceCount || 0),
+        fallbackBaselineResultCount: Number(fallbackDiagnostics.baselineResultCount || historyRows.length),
+        workspaceHistory: true,
+        workspaceHistoryOffset,
+        workspaceHistoryReadLimit: historyReadLimit,
+        workspaceHistoryNextPage: Boolean(nextCursor),
+        ...threadListFallbackBaselineWorkTimingFields(fallbackDiagnostics),
+        ...threadListFallbackSourceDiagnosticTimingFields(fallbackDiagnostics),
+      });
+      const result = normalizeThreadListResultStatuses({
+        data: page,
+        nextCursor,
+        mobileWorkspaceHistory: true,
+      });
+      threadDisplaySummaryCache.rememberList(result);
+      const stateAttachStartedAtMs = Date.now();
+      const stateAttachedResult = attachThreadListStateToResult(result);
+      markTiming("stateAttachMs", stateAttachStartedAtMs);
+      const decorateStartedAtMs = Date.now();
+      const decorated = tokenUsageStatsService.decorateThreadListResult(
+        stateAttachedResult,
+        { cwd, days: 31, workspaceCwds: tokenUsageWorkspaceCwds(globalState), allowExpiredTokenUsageCache: true },
+      );
+      Object.assign(timings, threadListTokenUsageTimingFields(decorated.mobileTokenUsageDiagnostics));
+      markTiming("decorateMs", decorateStartedAtMs);
+      attachDiagnostics(decorated);
+      sendThreadListResult("workspace_history_complete", decorated);
+      return { handled: true };
+    } catch (err) {
+      failThreadListCoalescing(err);
+      throw err;
+    }
+  }
   const appServerFetchPlan = planThreadListAppServerFetch({
     limit,
     cursor,

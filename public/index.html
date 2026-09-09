@@ -464,6 +464,10 @@
           <div id="threadDisplaySettingsStatus" class="settings-status" aria-live="polite"></div>
         </div>
         <div class="settings-section">
+          <div class="theme-settings-title">VoxSpark</div>
+          <button id="voxsparkLexiconOpen" class="voxspark-lexicon-open" type="button">个人词库</button>
+        </div>
+        <div class="settings-section">
           <div class="theme-settings-title">Codex Profile</div>
           <div id="codexProfileSettings" class="codex-profile-settings" aria-live="polite"></div>
         </div>
@@ -536,6 +540,20 @@
           <input id="fileInput" class="file-input" type="file" multiple disabled aria-label="Attach files" tabindex="-1">
         </div>
         <div class="composer-body">
+          <div id="voxsparkVoiceStatus" class="voxspark-voice-status" hidden>
+            <span id="voxsparkVoiceTarget" class="voxspark-voice-target"></span>
+            <span id="voxsparkVoiceStage" role="status" aria-live="polite"></span>
+            <span id="voxsparkVoiceDuration" class="voxspark-voice-duration" aria-label="录音时长"></span>
+          </div>
+          <section id="voxsparkRecovery" class="voxspark-recovery" aria-label="失败录音恢复" hidden>
+            <p id="voxsparkRecoveryNotice" role="status" aria-live="polite"></p>
+            <ul id="voxsparkRecoveryItems"></ul>
+          </section>
+          <details id="voxsparkQueue" class="voxspark-queue" hidden>
+            <summary id="voxsparkQueueSummary">语音队列（0）</summary>
+            <p id="voxsparkQueueNotice" role="status" aria-live="polite"></p>
+            <ol id="voxsparkQueueItems"></ol>
+          </details>
           <div class="composer-meta-row">
             <div id="composerTargetIndicator" class="composer-target-indicator" aria-live="polite" hidden>
               <span id="composerTargetLabel" class="composer-target-label">发送到</span>
@@ -826,6 +844,29 @@
       </details>
     </div>
   </div>
+  <dialog id="voxsparkLexiconDialog" class="voxspark-lexicon-dialog" aria-labelledby="voxsparkLexiconTitle">
+    <div class="voxspark-lexicon-heading">
+      <h2 id="voxsparkLexiconTitle">个人词库</h2>
+      <button id="voxsparkLexiconClose" type="button" aria-label="关闭个人词库">关闭</button>
+    </div>
+    <p class="voxspark-lexicon-help">这里的词条供同一 Bridge 的所有 Session 共用，从下一次录音生效。选中的词条会用于云端语音识别和整理，不上传完整词库。</p>
+    <form id="voxsparkLexiconForm" class="voxspark-lexicon-form">
+      <label for="voxsparkLexiconTerm">正确词条</label>
+      <input id="voxsparkLexiconTerm" type="text" maxlength="128" placeholder="例如：VoxSpark" autocomplete="off" required>
+      <label for="voxsparkLexiconAlias">常见错写（可选）</label>
+      <input id="voxsparkLexiconAlias" type="text" maxlength="128" placeholder="填写已确认的错误写法" autocomplete="off" aria-describedby="voxsparkLexiconAliasHelp">
+      <p id="voxsparkLexiconAliasHelp" class="voxspark-lexicon-help">填写错写即确认将该写法替换为正确词条，不做近音猜测。同名词条会补充错写并启用。</p>
+      <button id="voxsparkLexiconSave" type="submit">保存词条</button>
+    </form>
+    <p id="voxsparkLexiconStatus" class="voxspark-lexicon-status" role="status" aria-live="polite"></p>
+    <div class="voxspark-lexicon-toolbar">
+      <input id="voxsparkLexiconSearch" type="search" aria-label="搜索词条或错写" placeholder="搜索词条或错写" autocomplete="off">
+      <button id="voxsparkLexiconRefresh" type="button">刷新</button>
+    </div>
+    <p id="voxsparkLexiconCount" class="voxspark-lexicon-help"></p>
+    <p id="voxsparkLexiconEmpty" hidden>词库还是空的，可以添加第一个词条。</p>
+    <ul id="voxsparkLexiconItems" class="voxspark-lexicon-items"></ul>
+  </dialog>
 <!-- CODEX_MOBILE_SHELL_SCRIPTS:BEGIN -->
   <script src="/shell-asset-manifest.js"></script>
   <script src="/api-client.js"></script>
@@ -875,6 +916,8 @@
   <script src="/conversation-render-runtime.js"></script>
   <script src="/event-stream-runtime.js"></script>
   <script src="/composer-bridge-runtime.js"></script>
+  <script src="/voxspark-surface-host-runtime.js"></script>
+  <script src="/voxspark-lexicon-runtime.js"></script>
   <script src="/runtime-wiring-runtime.js"></script>
   <script src="/app-shell-runtime.js"></script>
   <script src="/app.js"></script>

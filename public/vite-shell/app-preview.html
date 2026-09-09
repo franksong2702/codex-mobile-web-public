@@ -466,6 +466,10 @@
           <div id="threadDisplaySettingsStatus" class="settings-status" aria-live="polite"></div>
         </div>
         <div class="settings-section">
+          <div class="theme-settings-title">VoxSpark</div>
+          <button id="voxsparkLexiconOpen" class="voxspark-lexicon-open" type="button">个人词库</button>
+        </div>
+        <div class="settings-section">
           <div class="theme-settings-title">Codex Profile</div>
           <div id="codexProfileSettings" class="codex-profile-settings" aria-live="polite"></div>
         </div>
@@ -538,6 +542,20 @@
           <input id="fileInput" class="file-input" type="file" multiple disabled aria-label="Attach files" tabindex="-1">
         </div>
         <div class="composer-body">
+          <div id="voxsparkVoiceStatus" class="voxspark-voice-status" hidden>
+            <span id="voxsparkVoiceTarget" class="voxspark-voice-target"></span>
+            <span id="voxsparkVoiceStage" role="status" aria-live="polite"></span>
+            <span id="voxsparkVoiceDuration" class="voxspark-voice-duration" aria-label="录音时长"></span>
+          </div>
+          <section id="voxsparkRecovery" class="voxspark-recovery" aria-label="失败录音恢复" hidden>
+            <p id="voxsparkRecoveryNotice" role="status" aria-live="polite"></p>
+            <ul id="voxsparkRecoveryItems"></ul>
+          </section>
+          <details id="voxsparkQueue" class="voxspark-queue" hidden>
+            <summary id="voxsparkQueueSummary">语音队列（0）</summary>
+            <p id="voxsparkQueueNotice" role="status" aria-live="polite"></p>
+            <ol id="voxsparkQueueItems"></ol>
+          </details>
           <div class="composer-meta-row">
             <div id="composerTargetIndicator" class="composer-target-indicator" aria-live="polite" hidden>
               <span id="composerTargetLabel" class="composer-target-label">发送到</span>
@@ -828,36 +846,60 @@
       </details>
     </div>
   </div>
+  <dialog id="voxsparkLexiconDialog" class="voxspark-lexicon-dialog" aria-labelledby="voxsparkLexiconTitle">
+    <div class="voxspark-lexicon-heading">
+      <h2 id="voxsparkLexiconTitle">个人词库</h2>
+      <button id="voxsparkLexiconClose" type="button" aria-label="关闭个人词库">关闭</button>
+    </div>
+    <p class="voxspark-lexicon-help">这里的词条供同一 Bridge 的所有 Session 共用，从下一次录音生效。选中的词条会用于云端语音识别和整理，不上传完整词库。</p>
+    <form id="voxsparkLexiconForm" class="voxspark-lexicon-form">
+      <label for="voxsparkLexiconTerm">正确词条</label>
+      <input id="voxsparkLexiconTerm" type="text" maxlength="128" placeholder="例如：VoxSpark" autocomplete="off" required>
+      <label for="voxsparkLexiconAlias">常见错写（可选）</label>
+      <input id="voxsparkLexiconAlias" type="text" maxlength="128" placeholder="填写已确认的错误写法" autocomplete="off" aria-describedby="voxsparkLexiconAliasHelp">
+      <p id="voxsparkLexiconAliasHelp" class="voxspark-lexicon-help">填写错写即确认将该写法替换为正确词条，不做近音猜测。同名词条会补充错写并启用。</p>
+      <button id="voxsparkLexiconSave" type="submit">保存词条</button>
+    </form>
+    <p id="voxsparkLexiconStatus" class="voxspark-lexicon-status" role="status" aria-live="polite"></p>
+    <div class="voxspark-lexicon-toolbar">
+      <input id="voxsparkLexiconSearch" type="search" aria-label="搜索词条或错写" placeholder="搜索词条或错写" autocomplete="off">
+      <button id="voxsparkLexiconRefresh" type="button">刷新</button>
+    </div>
+    <p id="voxsparkLexiconCount" class="voxspark-lexicon-help"></p>
+    <p id="voxsparkLexiconEmpty" hidden>词库还是空的，可以添加第一个词条。</p>
+    <ul id="voxsparkLexiconItems" class="voxspark-lexicon-items"></ul>
+  </dialog>
 <!-- CODEX_MOBILE_VITE_APP_PREVIEW:BEGIN -->
-  <link rel="modulepreload" href="/vite-shell/assets/_virtual_codex-mobile-esm-compatibility-eD3mwYDY.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-01-6SLPqW2e.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-02-2-31Za9L.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-03--CvcYrPZ.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-04-CFnLs2fj.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-05-2b6XxDrR.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-06-DrgZylQ2.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-07-D8M3s1r_.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-08-9Ldhny2Y.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-09-DwCOyIGC.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/shard-10-DAMOoqvT.js" data-codex-vite-esm-compatibility-chunk="true">
-  <link rel="modulepreload" href="/vite-shell/assets/vite-shell-entry-BCSe16hK.js" data-codex-vite-stable-entry-target="true">
+  <link rel="modulepreload" href="/vite-shell/assets/_virtual_codex-mobile-esm-compatibility-BiQj28BV.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-01-B04wi_-z.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-02-7-gKrBNz.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-03-Dy38P60J.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-04-4uLK7J-7.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-05-DSC7nOnk.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-06-BVWnbsRg.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-07-T4E2xOaU.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-08-hozyfwsE.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-09-KGg5z2HI.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-10-DknFCc72.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/shard-11-DOz-ePjl.js" data-codex-vite-esm-compatibility-chunk="true">
+  <link rel="modulepreload" href="/vite-shell/assets/vite-shell-entry-umM1xmNm.js" data-codex-vite-stable-entry-target="true">
   <script id="codex-vite-app-preview-loader-plan" type="application/json" data-codex-vite-app-preview-loader-plan="true">
 {
   "schemaVersion": 1,
   "source": "generated-vite-app-preview-classic-loader-plan",
   "owner": "vite-shell-entry",
-  "sourceScriptCount": 51,
+  "sourceScriptCount": 53,
   "scriptCount": 0,
   "firstScript": "",
   "lastScript": "",
   "hashCount": 0,
   "byteCount": 0,
-  "excludedEsmScriptCount": 49,
-  "excludedEsmHashCount": 49,
-  "excludedEsmByteCount": 1892814,
+  "excludedEsmScriptCount": 51,
+  "excludedEsmHashCount": 51,
+  "excludedEsmByteCount": 1984358,
   "excludedViteOwnedScriptCount": 2,
   "excludedViteOwnedHashCount": 2,
-  "excludedViteOwnedByteCount": 131660,
+  "excludedViteOwnedByteCount": 132544,
   "excludedEsmScripts": [
     {
       "index": 1,
@@ -910,8 +952,8 @@
       "startupCritical": true,
       "chunkTarget": "startup-foundation",
       "sourcePath": "public/composer-runtime.js",
-      "bytes": 90984,
-      "sha256": "930c4a747da94196d636369b65ae1f53c9c66c8c920749dc4fa8402b7c2ab3a0",
+      "bytes": 95888,
+      "sha256": "0c402ba951eb5c7e732c0ae14c1e5b951fa16353c665b4b67a7e9128e66355fc",
       "esmModuleId": "composer-runtime",
       "globalName": "CodexComposerRuntime"
     },
@@ -938,8 +980,8 @@
       "startupCritical": true,
       "chunkTarget": "startup-foundation",
       "sourcePath": "public/viewport-metrics.js",
-      "bytes": 4306,
-      "sha256": "0257cde3a6361697101c177b1ca242b3e117d7cc2e4cdee81a3d71fc63018539",
+      "bytes": 4678,
+      "sha256": "06fd876696b62aba496266a5a79ee99c38d109d69ade3cc8866833821e2a27d8",
       "esmModuleId": "viewport-metrics",
       "globalName": "CodexViewportMetrics"
     },
@@ -1106,8 +1148,8 @@
       "startupCritical": false,
       "chunkTarget": "deferred-feature-runtimes",
       "sourcePath": "public/thread-list-runtime.js",
-      "bytes": 40271,
-      "sha256": "fad5c07f03cec38f717883a0da621db9d917545505ba9b1cd9ea455a24f2ad35",
+      "bytes": 41747,
+      "sha256": "98328861875afa2f5280fa4156ab100e9d43cf69fe7743fff85bc79a09dc19c8",
       "esmModuleId": "thread-list-runtime",
       "globalName": "CodexThreadListRuntime"
     },
@@ -1372,8 +1414,8 @@
       "startupCritical": false,
       "chunkTarget": "deferred-shell-services",
       "sourcePath": "public/settings-runtime.js",
-      "bytes": 122819,
-      "sha256": "e536c77b52a2cd2f46e36a49b4d6b47e1e11dbb0f3f4a420a7e7db25136d7601",
+      "bytes": 125135,
+      "sha256": "a9c375d900cac93283745b077aa4c77c7788c962de8126af1071edbd549984f0",
       "esmModuleId": "settings-runtime",
       "globalName": "CodexSettingsRuntime"
     },
@@ -1400,8 +1442,8 @@
       "startupCritical": false,
       "chunkTarget": "deferred-shell-services",
       "sourcePath": "public/navigation-runtime.js",
-      "bytes": 81824,
-      "sha256": "0f484df1d8f6a0d4121e1381816ffb136b182905152ef3398377003e792333cb",
+      "bytes": 82069,
+      "sha256": "67ee8d98774e08f676427f4349ab0414c6ab40c675dc265f77d1b36771289523",
       "esmModuleId": "navigation-runtime",
       "globalName": "CodexNavigationRuntime"
     },
@@ -1506,34 +1548,62 @@
     {
       "index": 48,
       "sourceIndex": 48,
+      "path": "/voxspark-surface-host-runtime.js",
+      "groupId": "shell-services",
+      "phase": "classic-runtime",
+      "startupCritical": false,
+      "chunkTarget": "deferred-shell-services",
+      "sourcePath": "public/voxspark-surface-host-runtime.js",
+      "bytes": 67218,
+      "sha256": "f8e3386e7004e7d990d1d6b4d4999c910b0d612a0812ebbeb3f69486d20f8bdc",
+      "esmModuleId": "voxspark-surface-host-runtime",
+      "globalName": "CodexVoxSparkSurfaceHostRuntime"
+    },
+    {
+      "index": 49,
+      "sourceIndex": 49,
+      "path": "/voxspark-lexicon-runtime.js",
+      "groupId": "shell-services",
+      "phase": "classic-runtime",
+      "startupCritical": false,
+      "chunkTarget": "deferred-shell-services",
+      "sourcePath": "public/voxspark-lexicon-runtime.js",
+      "bytes": 9767,
+      "sha256": "a8abcb5e95c75ab76cdd00750457f7ca0ae09c88aee43c321d39c1d4eb6a2423",
+      "esmModuleId": "voxspark-lexicon-runtime",
+      "globalName": "CodexVoxSparkLexiconRuntime"
+    },
+    {
+      "index": 50,
+      "sourceIndex": 50,
       "path": "/runtime-wiring-runtime.js",
       "groupId": "app-entry",
       "phase": "startup-critical",
       "startupCritical": true,
       "chunkTarget": "startup-app-shell",
       "sourcePath": "public/runtime-wiring-runtime.js",
-      "bytes": 9963,
-      "sha256": "92532d235eeb3c0204697afba74a05620dd9066b4063c37dd8f05440e5dab11f",
+      "bytes": 14527,
+      "sha256": "55c350bb32f0763d43b8ac4c8b23f33e073308093d52eac810f386103c734bd5",
       "esmModuleId": "runtime-wiring-runtime",
       "globalName": "CodexRuntimeWiringRuntime"
     },
     {
-      "index": 49,
-      "sourceIndex": 49,
+      "index": 51,
+      "sourceIndex": 51,
       "path": "/app-shell-runtime.js",
       "groupId": "app-entry",
       "phase": "startup-critical",
       "startupCritical": true,
       "chunkTarget": "startup-app-shell",
       "sourcePath": "public/app-shell-runtime.js",
-      "bytes": 51930,
-      "sha256": "ca32789cb78c20b632d83aaad0298bc9f0b37c0751a4304485be161e9ed15e2a",
+      "bytes": 52612,
+      "sha256": "81d364318cb437c86ab13e08ae2f420f6e830c280795ddf190b21f861c72e561",
       "esmModuleId": "app-shell-runtime",
       "globalName": "CodexAppShellRuntime"
     },
     {
-      "index": 50,
-      "sourceIndex": 50,
+      "index": 52,
+      "sourceIndex": 52,
       "path": "/app.js",
       "groupId": "app-entry",
       "phase": "startup-critical",
@@ -1556,8 +1626,8 @@
       "startupCritical": true,
       "chunkTarget": "startup-manifest",
       "sourcePath": "public/shell-asset-manifest.js",
-      "bytes": 80933,
-      "sha256": "4262eb426bdc72438998c2fff09c31c0d7d5576b861784b51ec94c05164b6323",
+      "bytes": 81817,
+      "sha256": "d48ef339a6d360d990c2ff404af57ad3b14b6dbadaa59f6fa87c1905c3dbbc50",
       "ownerId": "shell-manifest",
       "globalName": "CODEX_MOBILE_SHELL_MANIFEST"
     },
@@ -1576,12 +1646,12 @@
       "globalName": "CodexAppBootstrap"
     }
   ],
-  "sha256": "fe09310cc3b76913b05ada78b7e099b2a7e28f73007f7f2dbfd43da46bcfdf47",
+  "sha256": "071c818ac2eb83bc8b9e35173848af09cfec1092165b81580b8973bf0f04f8a8",
   "scripts": []
 }
   </script>
   <script src="/shell-asset-manifest.js" data-codex-vite-current-shell-manifest="true"></script>
-  <script type="module" src="/vite-shell/app-preview-entry.js?targetEntry=vite-shell-entry-BCSe16hK.js" data-codex-vite-app-preview-entry="true"></script>
+  <script type="module" src="/vite-shell/app-preview-entry.js?targetEntry=vite-shell-entry-umM1xmNm.js" data-codex-vite-app-preview-entry="true"></script>
 <!-- CODEX_MOBILE_VITE_APP_PREVIEW:END -->
 
 <script>

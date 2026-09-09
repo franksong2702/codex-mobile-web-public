@@ -111,6 +111,12 @@ const { createViteShellArtifactService } = require("./services/runtime/vite-shel
 const { createServerRuntimeConfigService } = require("./services/runtime/server-runtime-config-service");
 const { createServerHttpRuntimeService } = require("./services/runtime/server-http-runtime-service");
 const { createServerRestartDrainService } = require("./services/runtime/server-restart-drain-service");
+const { createVoxSparkSurfaceHostService } = require("./services/runtime/voxspark-surface-host-service");
+const { createVoxSparkSurfaceTransactionStore } = require("./services/runtime/voxspark-surface-transaction-store");
+const {
+  createVoxSparkEncryptedQueueStore,
+  createVoxSparkKeychainQueueKeyProvider,
+} = require("./services/runtime/voxspark-encrypted-queue-store");
 const { createRuntimeSettingsService } = require("./services/runtime/runtime-settings-service");
 const { createThreadRuntimeSettingsService } = require("./services/runtime/thread-runtime-settings-service");
 const { createModelOptionsRuntimeService } = require("./services/runtime/model-options-runtime-service");
@@ -234,6 +240,8 @@ const {
   CHATGPT_PRO_OUTPUT_DIR,
   CHATGPT_PRO_BRIDGE_ENABLED,
   CHATGPT_PRO_PLANNER_DIR,
+  VOXSPARK_BRIDGE_URL,
+  VOXSPARK_POLISH_CONTEXT_CONSENT,
   CHATGPT_PRO_MCP_TOKEN,
   CHATGPT_PRO_MCP_TOKEN_FILE,
   CHATGPT_PRO_MCP_ALLOW_DIRECT_TASK_CARDS,
@@ -746,6 +754,9 @@ const {
 } = threadVisibilityService;
 const runtimePressureDiagnostics = createRuntimePressureDiagnosticsService();
 runtimePressureDiagnostics.enable();
+const voxsparkSubmissionTransactionStore = createVoxSparkSurfaceTransactionStore({
+  filePath: path.join(RUNTIME_ROOT, "voxspark", "submission-transactions.json"),
+});
 const mediaStaticRuntimeService = createMediaStaticRuntimeService({
   env: process.env,
   path,
@@ -765,6 +776,7 @@ const mediaStaticRuntimeService = createMediaStaticRuntimeService({
   getUrl,
   frameAncestorsHeader: () => hermesPluginService.frameAncestorsHeader(),
   sendJson,
+  messageSubmissionStore: voxsparkSubmissionTransactionStore,
 });
 const {
   mediaFileService,
@@ -1894,6 +1906,22 @@ const chatGptProRuntimeService = createChatGptProRuntimeService({
   truncateSingleLine,
   createThreadTaskCardsFromSourceThread,
 });
+const voxsparkSurfaceHostService = createVoxSparkSurfaceHostService({
+  readSubmissionReceipt: mediaFileService.readVoxSparkSubmissionReceipt,
+  defaultBridgeUrl: VOXSPARK_BRIDGE_URL,
+  polishContextConsent: VOXSPARK_POLISH_CONTEXT_CONSENT,
+  transactionStore: createVoxSparkSurfaceTransactionStore({
+    filePath: path.join(RUNTIME_ROOT, "voxspark", "surface-transactions.json"),
+  }),
+  queueStore: createVoxSparkEncryptedQueueStore({
+    filePath: path.join(RUNTIME_ROOT, "voxspark", "queued-submissions.enc"),
+    keyProvider: createVoxSparkKeychainQueueKeyProvider({
+      env: process.env,
+      userHome: USER_HOME,
+    }),
+  }),
+  logger: console,
+});
 const {
   chatGptProBridgeService,
   chatGptProMcpService,
@@ -2158,7 +2186,9 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   tryUpdateThreadTitle,
   upsertThreadListFallbackCacheThreads,
   userBehaviorRepairCardService,
+  visibleWorkspaceRoots,
   visibilityFromGlobalState,
+  voxsparkSurfaceHostService,
   viteShellArtifactService,
   webPushRuntimeService: notificationRuntimeService.webPushRuntimeService,
   workspaceDelegationPublicSettings,
@@ -2196,6 +2226,9 @@ function shutdown(reason = "signal") {
     remoteManagedWorkspaceRunnerService.stop();
   } catch (_) {}
   try {
+    voxsparkSurfaceHostService.stop();
+  } catch (_) {}
+  try {
     clearTaskCardExecutionWatchdog();
   } catch (_) {}
   try {
@@ -2226,7 +2259,7 @@ function startServer() {
   server.listen(PORT, HOST, () => {
     console.log(`Codex Mobile Web listening on http://${HOST}:${PORT}`);
     if (REQUIRE_SHARED_APP_SERVER) {
-      console.log(`Codex Mobile Web requires a shared app-server endpoint: ${MUX_ENDPOINT_FILE}`);
+      console.log(`Codex Mobile Web requires a shared app-server endpoint: ${EXTERNAL_APP_SERVER_WS || EXTERNAL_APP_SERVER_TCP || MUX_ENDPOINT_FILE}`);
     } else {
       console.log(`Codex app-server will be managed on 127.0.0.1 when first used.`);
     }

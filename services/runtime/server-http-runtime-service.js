@@ -356,8 +356,9 @@ function createServerHttpRuntimeService(dependencies = {}) {
   }
 
   function logClientEvent(event, details = {}) {
+    const unthrottled = new Set(["frontend_diagnostic_log", "voxspark_surface_host"]);
     appendRuntimeEventLine("client-event", event, details, {
-      minIntervalMs: String(event || "") === "frontend_diagnostic_log" ? 0 : undefined,
+      minIntervalMs: unthrottled.has(String(event || "")) ? 0 : undefined,
     });
   }
 

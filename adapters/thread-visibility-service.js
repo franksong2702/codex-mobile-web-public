@@ -37,6 +37,9 @@ function createThreadVisibilityService(options = {}) {
   const DEFAULT_CODEX_HOME = defaultCodexHome;
   const STATE_DB = stateDb;
   const USER_HOME = userHome;
+  const REALPATH_CACHE_TTL_MS = 30_000;
+  const MAX_REALPATH_CACHE_ENTRIES = 512;
+  const realpathCache = new Map();
   const annotateThreadRolloutStats = typeof rolloutStatsAnnotator === "function"
     ? rolloutStatsAnnotator
     : (thread) => thread;
@@ -52,8 +55,32 @@ function createThreadVisibilityService(options = {}) {
   }
 
   function normalizeFsPath(value) {
-    return String(value || "")
+    const raw = String(value || "")
+      .trim()
       .replace(/^\\\\\?\\/, "")
+      .replace(/\\+$/, "");
+    let canonical = raw;
+    // A Desktop workspace can be opened through a symlink while a thread cwd
+    // is reported through the physical path.  Resolve existing local paths so
+    // both spellings share one visibility identity; preserve the prior textual
+    // behavior for missing, remote, and cross-platform paths.
+    if (raw && path.isAbsolute(raw)) {
+      const now = Date.now();
+      const cached = realpathCache.get(raw);
+      if (cached && cached.expiresAt > now) canonical = cached.value;
+      try {
+        if (!cached || cached.expiresAt <= now) {
+          canonical = typeof fs.realpathSync.native === "function"
+            ? fs.realpathSync.native(raw)
+            : fs.realpathSync(raw);
+          if (realpathCache.size >= MAX_REALPATH_CACHE_ENTRIES) {
+            realpathCache.delete(realpathCache.keys().next().value);
+          }
+          realpathCache.set(raw, { value: canonical, expiresAt: now + REALPATH_CACHE_TTL_MS });
+        }
+      } catch (_) {}
+    }
+    return canonical
       .replace(/[\\/]+/g, "\\")
       .replace(/\\+$/, "")
       .toLowerCase();
@@ -61,11 +88,24 @@ function createThreadVisibilityService(options = {}) {
 
   function visibleWorkspaceRoots(globalState = readGlobalState()) {
     const roots = new Set();
+    // `project-order` is an ordering/index field in current Desktop state.  It
+    // can contain opaque project ids, which are not selectable filesystem
+    // workspaces.  Retain legacy path entries only when they are actual paths.
+    const workspacePathValue = (value) => {
+      const text = String(value || "").trim();
+      return Boolean(text) && (
+        path.isAbsolute(text)
+        || /^[a-z]:[\\/]/i.test(text)
+        || /^\\\\[^\\/]+[\\/]/.test(text)
+      );
+    };
     for (const key of ["active-workspace-roots", "electron-saved-workspace-roots", "project-order"]) {
       const values = globalState[key];
       if (!Array.isArray(values)) continue;
       for (const value of values) {
-        if (typeof value === "string" && value.trim()) roots.add(value);
+        if (typeof value !== "string" || !value.trim()) continue;
+        if (key === "project-order" && !workspacePathValue(value)) continue;
+        roots.add(value);
       }
     }
     for (const workspace of workspaceRegistryService.list()) {

@@ -41,7 +41,7 @@ test("thread runtime settings inherit model and effort from latest rollout conte
     rolloutPath,
     [
       JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.5", effort: "low" } }),
-      JSON.stringify({ type: "turn_context", payload: { model: "gpt-5-codex", reasoning_effort: "high", sandbox_policy: { type: "readOnly" } } }),
+      JSON.stringify({ type: "turn_context", payload: { model: "gpt-5-codex", reasoning_effort: "high", sandbox_policy: { type: "readOnly" }, active_permission_profile: { id: ":workspace" } } }),
       "",
     ].join("\n"),
   );
@@ -54,11 +54,13 @@ test("thread runtime settings inherit model and effort from latest rollout conte
     model: "gpt-5-codex",
     reasoning_effort: "high",
     sandbox_policy: { type: "readOnly" },
+    active_permission_profile: { id: ":workspace" },
   });
   const settings = service.threadRuntimeSettings("thread-1");
   assert.equal(settings.model, "gpt-5-codex");
   assert.equal(settings.reasoningEffort, "high");
   assert.equal(settings.sandboxMode, "read-only");
+  assert.equal(settings.permissionProfileId, ":workspace");
 });
 
 test("thread runtime settings accepts models from current effective options provider", () => {

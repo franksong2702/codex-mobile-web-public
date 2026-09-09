@@ -187,6 +187,13 @@ function createThreadRuntimeSettingsService(dependencies = {}) {
     );
     const sandboxPolicy = normalizeSandboxPolicy(context.sandbox_policy || (thread && thread.sandboxPolicy));
     const permissionProfile = normalizePermissionProfile(context.permission_profile || (thread && thread.permissionProfile));
+    const permissionProfileId = lastString(
+      context.active_permission_profile && context.active_permission_profile.id,
+      context.permissions,
+      thread && thread.activePermissionProfile && thread.activePermissionProfile.id,
+      thread && thread.permissionProfileId,
+      thread && thread.permissions,
+    );
     let approvalPolicy = normalizeEnumValue(
       lastString(context.approval_policy, thread && thread.approvalPolicy),
       approvalOptions,
@@ -209,6 +216,7 @@ function createThreadRuntimeSettingsService(dependencies = {}) {
       sandboxPolicy,
       sandboxMode: sandboxModeFromPolicy(sandboxPolicy),
       permissionProfile,
+      permissionProfileId,
       reasoningSummary,
       modelVerbosity,
     };

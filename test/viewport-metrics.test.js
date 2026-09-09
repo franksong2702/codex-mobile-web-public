@@ -132,6 +132,76 @@ test("regular mobile viewport callers can ignore document scroll while the keybo
   assert.equal(result.height, 520);
 });
 
+test("standalone mobile PWA exposes an overlay-keyboard state without inventing a height", () => {
+  const result = viewportMetrics.measureViewport({
+    visualViewportAvailable: true,
+    standaloneMobilePwa: true,
+    visualHeight: 844,
+    visualOffsetTop: 0,
+    innerHeight: 844,
+    clientHeight: 844,
+    activeElement: editableElement(),
+    composerInputActive: true,
+  });
+
+  assert.equal(result.keyboardCandidate, false);
+  assert.equal(result.keyboardOverlay, true);
+  assert.equal(result.keyboardShrunk, false);
+  assert.equal(result.height, 844);
+  assert.equal(result.top, 0);
+});
+
+test("overlay-keyboard fallback stays bounded to standalone mobile PWA focus", () => {
+  const desktop = viewportMetrics.measureViewport({
+    visualViewportAvailable: true,
+    standaloneMobilePwa: false,
+    visualHeight: 844,
+    innerHeight: 844,
+    clientHeight: 844,
+    activeElement: editableElement(),
+    composerInputActive: true,
+  });
+  const embedded = viewportMetrics.measureViewport({
+    visualViewportAvailable: true,
+    standaloneMobilePwa: false,
+    visualHeight: 844,
+    innerHeight: 844,
+    clientHeight: 844,
+    activeElement: editableElement(),
+    composerInputActive: true,
+    hostKeyboardVisible: true,
+    hostKeyboardBottomInset: 300,
+  });
+  const resized = viewportMetrics.measureViewport({
+    visualViewportAvailable: true,
+    standaloneMobilePwa: true,
+    visualHeight: 520,
+    innerHeight: 844,
+    clientHeight: 844,
+    activeElement: editableElement(),
+    composerInputActive: true,
+  });
+  const otherEditor = viewportMetrics.measureViewport({
+    visualViewportAvailable: true,
+    standaloneMobilePwa: true,
+    visualHeight: 844,
+    innerHeight: 844,
+    clientHeight: 844,
+    activeElement: editableElement(),
+    composerInputActive: false,
+  });
+
+  assert.equal(desktop.keyboardOverlay, false);
+  assert.equal(desktop.keyboardShrunk, false);
+  assert.equal(embedded.keyboardOverlay, false);
+  assert.equal(embedded.hostKeyboardVisible, true);
+  assert.equal(resized.keyboardOverlay, false);
+  assert.equal(resized.keyboardShrunk, true);
+  assert.equal(resized.height, 520);
+  assert.equal(otherEditor.keyboardOverlay, false);
+  assert.equal(otherEditor.keyboardShrunk, false);
+});
+
 test("viewport metrics do not treat non-text controls as keyboard owners", () => {
   const result = viewportMetrics.measureViewport({
     visualHeight: 520,

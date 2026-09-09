@@ -395,10 +395,16 @@ function scheduleThreadListDeferredSilentRefresh(delayMs = 700, options = {}) {
 
 async function loadThreads(options = {}) {
   const silent = options.silent === true;
+  const append = options.append === true && Boolean(options.cursor);
   if (silent && state.threadListLoadController) return null;
   if (options.deferFallback !== true) clearThreadListDeferredFallbackTimer();
-  const params = new URLSearchParams({ limit: String(THREAD_LIST_PAGE_LIMIT), archived: "false" });
-  if (state.selectedCwd) params.set("cwd", state.selectedCwd);
+  const pageLimit = state.selectedCwd ? Math.min(80, Number(THREAD_LIST_PAGE_LIMIT) || 80) : THREAD_LIST_PAGE_LIMIT;
+  const params = new URLSearchParams({ limit: String(pageLimit), archived: "false" });
+  if (state.selectedCwd) {
+    params.set("cwd", state.selectedCwd);
+    params.set("history", "workspace");
+  }
+  if (options.cursor) params.set("cursor", String(options.cursor));
   const search = $("threadSearch").value.trim();
   if (search) params.set("search", search);
   const threadDetailOpening = hasThreadDetailRequestInFlight();
@@ -434,15 +440,19 @@ async function loadThreads(options = {}) {
   if (state.threadListLoadController) state.threadListLoadController.abort();
   const controller = new AbortController();
   state.threadListLoadController = controller;
-  if (!silent) renderThreadListLoading();
+  if (!silent && !append) renderThreadListLoading();
   try {
     const apiStartedAt = nowPerfMs();
     const result = await api(`/api/threads?${params}`, { timeoutMs: 45000, signal: controller.signal });
     const apiElapsedMs = roundedDurationMs(apiStartedAt);
     if (seq !== state.threadListLoadSeq) return null;
     const renderStartedAt = nowPerfMs();
-    const nextThreads = visibleThreads(result.data || [])
+    const pageThreads = visibleThreads(result.data || [])
       .map((thread) => threadListSummaryFromDetailThread(thread) || thread);
+    const nextThreads = append ? [...state.threads, ...pageThreads].filter((thread, index, threads) => {
+      const id = String(thread && thread.id || "");
+      return id && threads.findIndex((candidate) => String(candidate && candidate.id || "") === id) === index;
+    }) : pageThreads;
     const stableOrderPlan = threadListStableOrderPolicy.planThreadListStableOrder({
       threads: nextThreads,
       previousState: state.threadListStableOrder,
@@ -453,6 +463,9 @@ async function loadThreads(options = {}) {
     });
     state.threads = stableOrderPlan.threads;
     state.threadListStableOrder = stableOrderPlan.state;
+    state.threadListNextCursor = state.selectedCwd && result.mobileWorkspaceHistory === true
+      ? String(result.nextCursor || "")
+      : "";
     state.workspaceTokenUsage = result.mobileTokenUsage || null;
     state.threadListLoadedAtMs = Date.now();
     reconcileThreadStatusHints(state.threads);
@@ -540,6 +553,12 @@ async function loadThreads(options = {}) {
   } finally {
     if (state.threadListLoadController === controller) state.threadListLoadController = null;
   }
+}
+
+async function loadMoreWorkspaceThreads() {
+  const cursor = String(state.threadListNextCursor || "").trim();
+  if (!state.selectedCwd || !cursor || state.threadListLoadController) return null;
+  return loadThreads({ append: true, cursor, allowDuringDetail: true });
 }
 
 function threadMatchesWorkspaceCwd(threadCwd, workspaceCwd) {
@@ -764,6 +783,9 @@ function renderThreads(result = null) {
     ? `<div class="history-note">Live thread list recovering. Showing cached session index.</div>`
     : "";
   const nowMs = Date.now();
+  const moreButton = state.selectedCwd && state.threadListNextCursor
+    ? `<button class="thread-list-load-more" type="button" data-thread-list-load-more>加载更多历史 session</button>`
+    : "";
   const html = warning + state.threads.map((thread) => {
     const title = thread.name || thread.preview || thread.id;
     const sizeText = rolloutSizeText(thread);
@@ -812,10 +834,11 @@ function renderThreads(result = null) {
         </div>
       </button>
     </div>`;
-  }).join("");
+  }).join("") + moreButton;
   const signature = JSON.stringify({
     warning: Boolean(warning),
     currentThreadId: state.currentThreadId,
+    nextCursor: state.threadListNextCursor || "",
     timeBucket: Math.floor(nowMs / 60000),
     threads: state.threads.map((thread) => [
       thread.id,
@@ -841,6 +864,8 @@ function renderThreads(result = null) {
   list.querySelectorAll("[data-thread]").forEach((button) => {
     button.addEventListener("click", handleThreadCardClick);
   });
+  const loadMore = list.querySelector("[data-thread-list-load-more]");
+  if (loadMore) loadMore.addEventListener("click", () => loadMoreWorkspaceThreads().catch(showError));
 }
 
 async function restoreThreadSelection() {
@@ -934,6 +959,7 @@ async function selectWorkspaceShortcut(cwd) {
     scheduleThreadListDeferredFallback,
     scheduleThreadListDeferredSilentRefresh,
     loadThreads,
+    loadMoreWorkspaceThreads,
     threadMatchesWorkspaceCwd,
     threadMatchesVisibleWorkspace,
     isHiddenThread,

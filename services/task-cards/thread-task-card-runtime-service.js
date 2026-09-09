@@ -241,6 +241,7 @@ function createThreadTaskCardRuntimeService(dependencies = {}) {
       sandboxPolicy: { type: "dangerFullAccess" },
       sandboxMode: "danger-full-access",
       permissionProfile: null,
+      permissionProfileId: "",
     });
   }
 

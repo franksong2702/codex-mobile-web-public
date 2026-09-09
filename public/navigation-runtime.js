@@ -489,6 +489,9 @@ function restoreDraftForCurrentTarget(options = {}) {
   setComposerText(draft && draft.text ? draft.text : "");
   applyDraftRuntimeSelection(draft || null, options);
   replacePendingAttachments([], { saveDraft: false });
+  // The Session and its Composer are now committed together. Publish before
+  // expensive conversation rendering, rather than waiting for the next poll.
+  if (window.voxsparkSurfaceHostRuntime) window.voxsparkSurfaceHostRuntime.syncContext();
   renderComposerSettings();
   updateComposerControls();
   const metas = draft && Array.isArray(draft.attachments) ? draft.attachments : [];

@@ -76,10 +76,32 @@ test("task-card runtime policy applies inherited model, effort, guidance, and wo
   assert.equal(params.approvalPolicy, "on-request");
   assert.equal(params.sandboxPolicy.type, "workspaceWrite");
   assert.ok(params.sandboxPolicy.writableRoots.includes(path.join(workspace, ".git")));
-  assert.deepEqual(params.permissionProfile, { type: "managed", cwd: workspace });
+  assert.equal(params.permissionProfile, undefined);
+  assert.equal(params.permissions, undefined);
   assert.match(params.developerInstructions, /workspace delegation guidance/);
 
   fs.rmSync(workspace, { recursive: true, force: true });
+});
+
+test("task-card runtime policy sends named permissions without deprecated permissionProfile", () => {
+  const service = createService({ workspaceDelegationWriteGuardDisabled: true });
+  const settings = {
+    permissionProfile: { type: "managed" },
+    permissionProfileId: ":workspace",
+    sandboxMode: "workspace-write",
+    sandboxPolicy: { type: "workspaceWrite", writableRoots: ["/workspace"] },
+  };
+
+  const startParams = service.applyStartThreadRuntimeSettings({ permissionProfile: { type: "stale" } }, settings);
+  const resumeParams = service.applyResumeRuntimeSettings({ permissionProfile: { type: "stale" } }, settings);
+  const turnParams = service.applyTurnRuntimeSettings({ permissionProfile: { type: "stale" } }, settings);
+
+  for (const params of [startParams, resumeParams, turnParams]) {
+    assert.equal(params.permissions, ":workspace");
+    assert.equal(params.permissionProfile, undefined);
+    assert.equal(params.sandbox, undefined);
+    assert.equal(params.sandboxPolicy, undefined);
+  }
 });
 
 test("task-card runtime policy applies a normalized reasoning effort floor", () => {

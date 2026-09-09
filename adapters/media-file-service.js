@@ -115,9 +115,10 @@ function getUrl(req) {
   return new URL(req.url || "/", "http://127.0.0.1");
 }
 
-function createStatusError(statusCode, message) {
+function createStatusError(statusCode, message, code = "") {
   const err = new Error(message);
   err.statusCode = statusCode;
+  if (code) err.code = code;
   return err;
 }
 
@@ -140,6 +141,12 @@ function createMediaFileService(options = {}) {
   const imageContextPolicy = options.imageContextPolicy || parseImageContextPolicyEnv(env);
   const persistExtendedHistoryPolicy = options.persistExtendedHistoryPolicy || parsePersistExtendedHistoryEnv(env);
   const recentMessageSubmissions = options.recentMessageSubmissions || new Map();
+  const messageSubmissionStore = options.messageSubmissionStore || null;
+  const durableMessageSubmissionTtlMs = Math.max(
+    messageDedupeWindowMs,
+    Number(options.durableMessageSubmissionTtlMs || 24 * 60 * 60 * 1000),
+  );
+  const durableMessageSubmissions = new Map();
   const readBody = options.readBody || (async () => ({}));
   const readRawBody = options.readRawBody || (async () => Buffer.alloc(0));
   const readGlobalState = options.readGlobalState || (() => ({}));
@@ -151,6 +158,73 @@ function createMediaFileService(options = {}) {
   const readStateDbThread = options.readStateDbThread || (() => null);
   const readStartedThread = options.readStartedThread || (() => null);
   const rolloutPathForThread = options.rolloutPathForThread || (() => "");
+
+  function isDurableVoxSparkSubmissionKey(key) {
+    return /^client:.+:voxspark-/.test(String(key || ""));
+  }
+
+  function normalizeDurableSubmissionResult(result) {
+    const source = result && typeof result === "object" ? result : {};
+    const turnId = String(source.turnId || source.id || source.turn && source.turn.id || "").trim();
+    return {
+      ok: source.ok !== false,
+      ...(turnId ? { turnId } : {}),
+      ...(source.steeringQueued ? { steeringQueued: true } : {}),
+    };
+  }
+
+  function persistDurableMessageSubmissions() {
+    if (!messageSubmissionStore || typeof messageSubmissionStore.save !== "function") return false;
+    return messageSubmissionStore.save({
+      submissions: [...durableMessageSubmissions.entries()].map(([key, value]) => ({ key, ...value })),
+    });
+  }
+
+  function restoreDurableMessageSubmissions() {
+    if (!messageSubmissionStore || typeof messageSubmissionStore.load !== "function") return;
+    const stored = messageSubmissionStore.load();
+    const now = Date.now();
+    let changed = false;
+    for (const item of Array.isArray(stored && stored.submissions) ? stored.submissions : []) {
+      const key = String(item && item.key || "");
+      const startedAt = Number(item && item.startedAt || 0);
+      if (!isDurableVoxSparkSubmissionKey(key) || !startedAt || now - startedAt > durableMessageSubmissionTtlMs) {
+        changed = true;
+        continue;
+      }
+      const phase = item.phase === "succeeded" ? "succeeded" : "unknown";
+      if (item.phase === "executing") changed = true;
+      durableMessageSubmissions.set(key, {
+        phase,
+        startedAt,
+        updatedAt: Number(item.updatedAt || startedAt),
+        ...(phase === "succeeded" ? { result: normalizeDurableSubmissionResult(item.result) } : {}),
+      });
+    }
+    if (changed) persistDurableMessageSubmissions();
+  }
+
+  restoreDurableMessageSubmissions();
+
+  // Read the same ledger that guards execution; absence is never proof of failure.
+  function readVoxSparkSubmissionReceipt(sessionId, clientSubmissionId) {
+    if (!messageSubmissionStore || typeof messageSubmissionStore.load !== "function") {
+      return { phase: "unavailable" };
+    }
+    const storeStatus = typeof messageSubmissionStore.status === "function" ? messageSubmissionStore.status() : {};
+    if (storeStatus.lastReadStatus && !["ok", "missing"].includes(storeStatus.lastReadStatus)) {
+      return { phase: "unavailable" };
+    }
+    if (typeof sessionId !== "string" || !sessionId || sessionId.length > 128
+      || typeof clientSubmissionId !== "string" || !/^voxspark-[A-Za-z0-9._:-]+$/.test(clientSubmissionId)
+      || clientSubmissionId.length > 160) return { phase: "unavailable" };
+    const entry = durableMessageSubmissions.get(`client:${sessionId}:${clientSubmissionId}`);
+    if (!entry || Date.now() - entry.startedAt > durableMessageSubmissionTtlMs) return { phase: "missing" };
+    if (entry.phase === "succeeded" && entry.result && entry.result.ok === true) {
+      return { phase: "succeeded" };
+    }
+    return { phase: entry.phase === "executing" ? "executing" : "unknown" };
+  }
 
   function filePreviewEnvRoots() {
     return String(env.CODEX_MOBILE_FILE_PREVIEW_ROOTS || "")
@@ -750,6 +824,20 @@ function createMediaFileService(options = {}) {
       if (!firstKey) break;
       recentMessageSubmissions.delete(firstKey);
     }
+    let durableChanged = false;
+    for (const [key, entry] of durableMessageSubmissions) {
+      if (now - entry.startedAt > durableMessageSubmissionTtlMs) {
+        durableMessageSubmissions.delete(key);
+        durableChanged = true;
+      }
+    }
+    while (durableMessageSubmissions.size > messageDedupeMax) {
+      const firstKey = durableMessageSubmissions.keys().next().value;
+      if (!firstKey) break;
+      durableMessageSubmissions.delete(firstKey);
+      durableChanged = true;
+    }
+    if (durableChanged) persistDurableMessageSubmissions();
   }
 
   function cleanupDuplicateUploads(uploads) {
@@ -774,12 +862,81 @@ function createMediaFileService(options = {}) {
         return existing.promise;
       }
     }
+    const durableKeys = keyList.filter(isDurableVoxSparkSubmissionKey);
+    for (const key of durableKeys) {
+      const existing = durableMessageSubmissions.get(key);
+      if (!existing) continue;
+      cleanupDuplicateUploads(duplicateUploads);
+      if (existing.phase === "succeeded") return existing.result;
+      throw createStatusError(
+        409,
+        "VoxSpark submission outcome is unknown after restart",
+        "voxspark_submission_outcome_unknown",
+      );
+    }
     const entry = { startedAt: now, promise: null };
+    if (durableKeys.length) {
+      for (const key of durableKeys) {
+        durableMessageSubmissions.set(key, { phase: "executing", startedAt: now, updatedAt: now });
+      }
+      if (!persistDurableMessageSubmissions()) {
+        for (const key of durableKeys) durableMessageSubmissions.delete(key);
+        throw createStatusError(
+          503,
+          "VoxSpark submission ledger is unavailable",
+          "voxspark_submission_ledger_unavailable",
+        );
+      }
+    }
     entry.promise = Promise.resolve()
       .then(fn)
+      .then((result) => {
+        if (durableKeys.length) {
+          const durableResult = normalizeDurableSubmissionResult(result);
+          for (const key of durableKeys) {
+            durableMessageSubmissions.set(key, {
+              phase: "succeeded",
+              startedAt: now,
+              updatedAt: Date.now(),
+              result: durableResult,
+            });
+          }
+          if (!persistDurableMessageSubmissions()) {
+            for (const key of durableKeys) {
+              durableMessageSubmissions.set(key, {
+                phase: "unknown",
+                startedAt: now,
+                updatedAt: Date.now(),
+              });
+            }
+            persistDurableMessageSubmissions();
+            throw createStatusError(
+              409,
+              "VoxSpark submission outcome is unknown because its success receipt could not be persisted",
+              "voxspark_submission_outcome_unknown",
+            );
+          }
+        }
+        return result;
+      })
       .catch((err) => {
         for (const key of keyList) {
           if (recentMessageSubmissions.get(key) === entry) recentMessageSubmissions.delete(key);
+        }
+        if (durableKeys.length && err.code !== "voxspark_submission_outcome_unknown") {
+          for (const key of durableKeys) {
+            durableMessageSubmissions.set(key, {
+              phase: "unknown",
+              startedAt: now,
+              updatedAt: Date.now(),
+            });
+          }
+          persistDurableMessageSubmissions();
+          throw createStatusError(
+            409,
+            "VoxSpark submission outcome is unknown after the Codex request failed",
+            "voxspark_submission_outcome_unknown",
+          );
         }
         throw err;
       });
@@ -975,6 +1132,7 @@ function createMediaFileService(options = {}) {
     publicConfig,
     readFilePreview,
     readMessageBody,
+    readVoxSparkSubmissionReceipt,
     referencedPreviewFilesForThread,
     resolveFilePreviewPath,
     runMessageSubmissionOnce,

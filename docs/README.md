@@ -26,6 +26,8 @@ Always start substantial work by reading:
 | Scheduled private/public PR intake, absorption, release gates, public sync, PR close policy | `docs/PR_AUTOMATION.md` |
 | Canonical fork ownership, upstream intake, release and remote policy | `docs/FORK_GOVERNANCE.md` |
 | Current-thread side chat planning | `docs/THREAD_SIDE_CHAT_REQUIREMENTS.md`, `docs/THREAD_SIDE_CHAT_DESIGN.md`, `docs/THREAD_SIDE_CHAT_IMPLEMENTATION.md` |
+| VoxSpark current baseline, candidate and runtime boundaries | `docs/VOXSPARK_BASELINE.md` |
+| VoxSpark browser Host Adapter, Composer ownership, Queue/Steer/Stop mapping | `docs/VOXSPARK_SURFACE_HOST.md` |
 | ChatGPT Pro planner / MCP connector planning | `docs/CHATGPT_PRO_PLANNER_CONNECTOR_DESIGN.md` |
 | Multi-account Codex CLI on this Windows machine | `docs/MULTI_ACCOUNT_CODEX_CLI.md` |
 | Public/private release decision | `.agent-context/PROJECT_CONTEXT.md` plus current git state |

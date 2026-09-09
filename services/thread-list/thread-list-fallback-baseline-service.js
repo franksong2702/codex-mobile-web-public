@@ -135,7 +135,7 @@ function createThreadListFallbackBaselineService(options = {}) {
     const requiredLimit = sourceSnapshotLimit(limit, filters);
     if (!key) return null;
     const cached = sourceSnapshots.get(key);
-    if (cached && Number(cached.sourceLimit || 0) >= requiredLimit) {
+    if (cached && filters.forceSourceSnapshot !== true && Number(cached.sourceLimit || 0) >= requiredLimit) {
       return {
         hit: true,
         key,

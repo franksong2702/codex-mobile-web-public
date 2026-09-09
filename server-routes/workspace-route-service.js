@@ -28,6 +28,8 @@ function createWorkspaceRouteService(dependencies = {}) {
     listWorkspaces,
     normalizeFsPath,
     tokenUsageWorkspaceCwds,
+    readGlobalState,
+    visibleWorkspaceRoots,
     workspaceRegistryService,
     syncRegisteredWorkspaceTrust,
     syncKnownCodexMobileMcpToolsets,
@@ -50,11 +52,21 @@ function createWorkspaceRouteService(dependencies = {}) {
     }
   }
 
+  function desktopWorkspaceRoots() {
+    if (typeof readGlobalState !== "function" || typeof visibleWorkspaceRoots !== "function") return [];
+    try {
+      const roots = visibleWorkspaceRoots(readGlobalState());
+      return roots instanceof Set ? [...roots] : Array.isArray(roots) ? roots : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
   async function workspaceRows() {
     const rows = typeof listWorkspaces === "function" ? await listWorkspaces() : [];
     const out = Array.isArray(rows) ? rows.slice() : [];
     const byKey = new Set(out.map((row) => normalizePath(row && row.cwd)).filter(Boolean));
-    for (const cwd of workspaceSnapshotCwds()) {
+    for (const cwd of [...desktopWorkspaceRoots(), ...workspaceSnapshotCwds()]) {
       const key = normalizePath(cwd);
       if (!key || byKey.has(key)) continue;
       byKey.add(key);

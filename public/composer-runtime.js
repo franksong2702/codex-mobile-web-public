@@ -64,6 +64,7 @@ function createComposerRuntime(deps = {}) {
     newThreadSelectedPermissionMode,
     normalizeOptionList,
     normalizeThreadGoal,
+    onComposerSubmitted = () => {},
     openThreadGoalDialog,
     postClientEvent,
     publishPluginVoiceInputCapability,
@@ -152,6 +153,17 @@ function finishSendProgressWatchdog() {
   state.sendProgressWarned = false;
 }
 
+function notifyComposerSubmitted(details) {
+  try {
+    onComposerSubmitted(details);
+  } catch (err) {
+    postClientEvent("voxspark_submit_sync_failed", {
+      threadId: String(details && details.threadId || ""),
+      error: String(err && err.message || "surface_callback_failed").slice(0, 160),
+    });
+  }
+}
+
 function normalizeClientErrorMessage(message, err = null) {
   const code = String(err && err.code || "").trim();
   if (code === "codex_account_auth_invalid") {
@@ -206,6 +218,46 @@ function setComposerText(value) {
   autoSizeMessageInput(el, { force: true });
 }
 
+// Final external dictation preserves the surrounding editor content and places
+// the caret after the insertion. A selection is not permission to delete text.
+function insertComposerText(value) {
+  const input = $("messageInput");
+  const addition = String(value || "").trim();
+  if (!input || !addition || state.composerComposing
+    || input.contentEditable === "false" || input.getAttribute("aria-disabled") === "true") return null;
+  const selection = window.getSelection();
+  if (!selection) return null;
+  let range = selection.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+  if (!range || !input.contains(range.startContainer) || !input.contains(range.endContainer)) {
+    range = document.createRange();
+    range.selectNodeContents(input);
+  }
+  range.collapse(false);
+  const before = document.createRange();
+  before.selectNodeContents(input);
+  before.setEnd(range.startContainer, range.startOffset);
+  const after = document.createRange();
+  after.selectNodeContents(input);
+  after.setStart(range.endContainer, range.endOffset);
+  const beforeText = before.toString();
+  const afterText = after.toString();
+  const atEnd = afterText.length === 0;
+  const prefix = atEnd && beforeText && !/\s$/u.test(beforeText) ? " " : "";
+  const container = range.startContainer;
+  const placeholder = container.nodeType === 1 && container.childNodes.length === 1
+    && container.firstChild.nodeName === "BR" ? container.firstChild : null;
+  const node = document.createTextNode(`${prefix}${addition}`);
+  range.insertNode(node);
+  if (placeholder) placeholder.remove();
+  range.setStart(node, prefix.length + addition.length);
+  range.collapse(true);
+  input.focus({ preventScroll: true });
+  selection.removeAllRanges();
+  selection.addRange(range);
+  autoSizeMessageInput(input, { force: true });
+  return { text: composerText(), atEnd };
+}
+
 function placeMessageInputCaretAtEnd(input) {
   if (!input || !window.getSelection || !document.createRange) return false;
   try {
@@ -256,7 +308,7 @@ function focusMessageInput(options = {}) {
 function messageInputKeyboardVisible() {
   if (!isKeyboardEditableElement(document.activeElement)) return false;
   const viewport = viewportState();
-  return Boolean(viewport && (viewport.keyboardShrunk || viewport.hostKeyboardVisible));
+  return Boolean(viewport && (viewport.keyboardShrunk || viewport.keyboardOverlay || viewport.hostKeyboardVisible));
 }
 
 function shouldRecoverMessageInputKeyboard() {
@@ -1876,7 +1928,10 @@ async function sendMessage(event) {
   const steering = Boolean(targetActiveTurnId && hasContent);
   const steerTurnId = steering ? String(targetActiveTurnId) : "";
   const submittedDraftKey = currentDraftKey();
-  const clientSubmissionId = createSubmissionId();
+  const requestedSubmissionId = String(event && event.clientSubmissionId || "").trim();
+  const clientSubmissionId = /^[A-Za-z0-9._:-]{1,128}$/.test(requestedSubmissionId)
+    ? requestedSubmissionId
+    : createSubmissionId();
   const submittedAttachments = state.pendingAttachments.slice();
   const previousThreadStatus = snapshotThreadStatus(targetThreadId);
   if (typeof recordSubmittedEchoDiagnosticLog === "function") {
@@ -1981,6 +2036,12 @@ async function sendMessage(event) {
         });
       }
     }
+    notifyComposerSubmitted({
+      threadId: targetThreadId,
+      clientSubmissionId,
+      steering,
+      text: outboundText,
+    });
     commitPluginVoiceInputSessionsAfterSend(submittedDraftKey, text, {
       threadId: targetThreadId,
       messageId: clientSubmissionId,
@@ -2040,6 +2101,8 @@ async function sendMessage(event) {
         statusCode: diagnosticErrorStatus(err),
       });
     }
+    if (requestedSubmissionId.startsWith("voxspark-")
+      && err && err.code === "voxspark_submission_outcome_unknown") throw err;
   } finally {
     finishSendProgressWatchdog();
     state.composerBusy = false;
@@ -2053,6 +2116,52 @@ async function sendMessage(event) {
       });
     }
   }
+}
+
+async function sendVoxSparkDraft(request = {}) {
+  const targetThreadId = String(request.threadId || "").trim();
+  const outboundText = String(request.text || "").trim();
+  const mode = String(request.mode || "submit");
+  const targetActiveTurnId = mode === "steer" ? String(request.activeTurnId || "").trim() : "";
+  if (!targetThreadId || !outboundText) throw new Error("invalid_voxspark_draft");
+  if (mode === "steer" && !targetActiveTurnId) throw new Error("voxspark_active_turn_missing");
+
+  const body = new FormData();
+  const requestedSubmissionId = String(request.clientSubmissionId || "").trim();
+  const clientSubmissionId = /^[A-Za-z0-9._:-]{1,128}$/.test(requestedSubmissionId)
+    ? requestedSubmissionId
+    : createSubmissionId();
+  body.append("clientSubmissionId", clientSubmissionId);
+  body.append("text", outboundText);
+  if (request.thread && request.thread.cwd) body.append("cwd", request.thread.cwd);
+  if (targetActiveTurnId) body.append("activeTurnId", targetActiveTurnId);
+  if (request.strictSteer === true) body.append("strictSteer", "1");
+  body.append("model", request.thread && request.thread.model || selectedComposerModel());
+  body.append("effort", request.thread && request.thread.effort || selectedComposerEffort());
+  body.append("permissionMode", effectiveDefaultPermissionMode(request.thread) || selectedComposerPermissionMode());
+  if (codexFastCommandEnabled()) body.append("fastMode", "1");
+
+  await api(`/api/threads/${encodeURIComponent(targetThreadId)}/messages`, {
+    method: "POST",
+    body,
+    timeoutMs: 180000,
+  });
+  if (!request.preserveComposerDraft) {
+    clearDraftForKey(draftKeyForThread(targetThreadId));
+    notifyComposerSubmitted({
+      threadId: targetThreadId,
+      clientSubmissionId,
+      steering: mode === "steer",
+      text: outboundText,
+    });
+  }
+  scheduleComposerTargetRefresh(targetThreadId, 250, "voxspark-background-submit");
+  if (typeof schedulePostCompletionThreadRefreshes === "function") {
+    schedulePostCompletionThreadRefreshes(targetThreadId, [350, 750, 1200, 2400]);
+  }
+  scheduleLivePollIfNeeded(1200);
+  loadThreads({ silent: true }).catch(showError);
+  return true;
 }
 
 async function sendNewThreadMessage(text, hasContent, input) {
@@ -2262,6 +2371,7 @@ async function interruptActiveTurn(threadId = currentComposerThreadId(), activeT
     rawMessageFallback,
     composerText,
     setComposerText,
+    insertComposerText,
     placeMessageInputCaretAtEnd,
     focusMessageInput,
     messageInputKeyboardVisible,
@@ -2352,6 +2462,7 @@ async function interruptActiveTurn(threadId = currentComposerThreadId(), activeT
     sendThreadTaskCardCommand,
     submitAtLoopRequest,
     sendMessage,
+    sendVoxSparkDraft,
     sendNewThreadMessage,
     requestComposerSubmitFromButton,
     requestAttachmentPickerFromButton,

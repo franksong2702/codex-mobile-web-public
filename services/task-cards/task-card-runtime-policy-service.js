@@ -60,9 +60,6 @@ function createTaskCardRuntimePolicyService(options = {}) {
   const normalizeSandboxPolicyType = typeof options.normalizeSandboxPolicyType === "function"
     ? options.normalizeSandboxPolicyType
     : (value) => String(value || "");
-  const workspaceDelegationWriteGuardPermissionProfile = typeof options.workspaceDelegationWriteGuardPermissionProfile === "function"
-    ? options.workspaceDelegationWriteGuardPermissionProfile
-    : () => "";
   const attachWorkspaceDelegationRuntimeGuidance = typeof options.attachWorkspaceDelegationRuntimeGuidance === "function"
     ? options.attachWorkspaceDelegationRuntimeGuidance
     : () => {};
@@ -258,10 +255,12 @@ function createTaskCardRuntimePolicyService(options = {}) {
     if (applyOptions.useSandboxPolicy) {
       params.sandboxPolicy = { type: "dangerFullAccess" };
       delete params.permissionProfile;
+      delete params.permissions;
       delete params.sandbox;
     } else {
       params.sandbox = "danger-full-access";
       delete params.permissionProfile;
+      delete params.permissions;
       delete params.sandboxPolicy;
     }
     return params;
@@ -287,14 +286,46 @@ function createTaskCardRuntimePolicyService(options = {}) {
       return applyWorkspaceDelegationFullAccessCompatRuntime(params, applyOptions);
     }
     params.approvalPolicy = "on-request";
+    delete params.permissionProfile;
+    delete params.permissions;
     if (applyOptions.useSandboxPolicy) {
       params.sandboxPolicy = workspaceDelegationWriteGuardSandboxPolicy(cwd, settings && settings.sandboxPolicy);
-      params.permissionProfile = workspaceDelegationWriteGuardPermissionProfile(cwd, settings && settings.sandboxPolicy);
       delete params.sandbox;
     } else {
       params.sandbox = "workspace-write";
-      params.permissionProfile = workspaceDelegationWriteGuardPermissionProfile(cwd, settings && settings.sandboxPolicy);
       delete params.sandboxPolicy;
+    }
+    return params;
+  }
+
+  function applyStartOrResumePermissionSettings(params, settings) {
+    delete params.permissionProfile;
+    if (!settings) return params;
+    const permissionProfileId = String(settings.permissionProfileId || "").trim();
+    if (permissionProfileId) {
+      params.permissions = permissionProfileId;
+      delete params.sandbox;
+      delete params.sandboxPolicy;
+    } else if (settings.sandboxMode) {
+      params.sandbox = settings.sandboxMode;
+      delete params.permissions;
+      delete params.sandboxPolicy;
+    }
+    return params;
+  }
+
+  function applyTurnPermissionSettings(params, settings) {
+    delete params.permissionProfile;
+    if (!settings) return params;
+    const permissionProfileId = String(settings.permissionProfileId || "").trim();
+    if (permissionProfileId) {
+      params.permissions = permissionProfileId;
+      delete params.sandbox;
+      delete params.sandboxPolicy;
+    } else if (settings.sandboxPolicy) {
+      params.sandboxPolicy = settings.sandboxPolicy;
+      delete params.permissions;
+      delete params.sandbox;
     }
     return params;
   }
@@ -302,8 +333,6 @@ function createTaskCardRuntimePolicyService(options = {}) {
   function applyResumeRuntimeSettings(params, settings) {
     if (settings) {
       if (settings.approvalPolicy) params.approvalPolicy = settings.approvalPolicy;
-      if (settings.permissionProfile) params.permissionProfile = settings.permissionProfile;
-      else if (settings.sandboxMode) params.sandbox = settings.sandboxMode;
       if (settings.model) params.model = settings.model;
       if (settings.reasoningEffort) params.effort = settings.reasoningEffort;
       const config = {};
@@ -311,6 +340,7 @@ function createTaskCardRuntimePolicyService(options = {}) {
       if (settings.modelVerbosity) config.model_verbosity = settings.modelVerbosity;
       if (Object.keys(config).length) params.config = Object.assign({}, params.config || {}, config);
     }
+    applyStartOrResumePermissionSettings(params, settings);
     return applyWorkspaceDelegationRuntimeGuard(params, settings, { useSandboxPolicy: false });
   }
 
@@ -321,14 +351,13 @@ function createTaskCardRuntimePolicyService(options = {}) {
     }
     if (settings) {
       if (settings.approvalPolicy) params.approvalPolicy = settings.approvalPolicy;
-      if (settings.permissionProfile) params.permissionProfile = settings.permissionProfile;
-      else if (settings.sandboxMode) params.sandbox = settings.sandboxMode;
       if (settings.model) params.model = settings.model;
       const config = {};
       if (settings.reasoningSummary) config.model_reasoning_summary = settings.reasoningSummary;
       if (settings.modelVerbosity) config.model_verbosity = settings.modelVerbosity;
       if (Object.keys(config).length) params.config = Object.assign({}, params.config || {}, config);
     }
+    applyStartOrResumePermissionSettings(params, settings);
     return applyWorkspaceDelegationRuntimeGuard(params, settings, { useSandboxPolicy: false });
   }
 
@@ -337,12 +366,11 @@ function createTaskCardRuntimePolicyService(options = {}) {
     else attachWorkspaceDelegationRuntimeGuidance(params);
     if (settings) {
       if (settings.approvalPolicy) params.approvalPolicy = settings.approvalPolicy;
-      if (settings.sandboxPolicy) params.sandboxPolicy = settings.sandboxPolicy;
-      else if (settings.permissionProfile) params.permissionProfile = settings.permissionProfile;
       if (settings.model) params.model = settings.model;
       if (settings.reasoningEffort) params.effort = settings.reasoningEffort;
       if (settings.reasoningSummary) params.summary = settings.reasoningSummary;
     }
+    applyTurnPermissionSettings(params, settings);
     return applyWorkspaceDelegationRuntimeGuard(params, settings, { useSandboxPolicy: true });
   }
 

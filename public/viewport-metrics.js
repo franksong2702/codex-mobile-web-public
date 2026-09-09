@@ -74,6 +74,17 @@
     const keyboardInputActive = Boolean(input.keyboardInputActive || isKeyboardEditable(input.activeElement));
     const offsetKeyboardShifted = Boolean(keyboardInputActive && visualOffsetTop > 40);
     const scrollKeyboardShifted = Boolean(keyboardInputActive && scrollTop > 40);
+    const keyboardOverlay = Boolean(
+        keyboardInputActive
+        && input.composerInputActive === true
+        && input.standaloneMobilePwa === true
+        && input.visualViewportAvailable === true
+        && visual
+        && layout
+        && !keyboardCandidate
+        && !offsetKeyboardShifted
+        && !scrollKeyboardShifted,
+    );
     const keyboardShrunk = Boolean(keyboardInputActive && (keyboardCandidate || offsetKeyboardShifted || scrollKeyboardShifted || hostKeyboardVisible));
     const hostKeyboardHeight = hostKeyboardVisible ? Math.max(minHeight, hostViewportHeight || (layout ? layout - hostKeyboardBottomInset : 0)) : 0;
     const localVisualHeight = visual || (visualBottom ? Math.max(0, visualBottom - visualOffsetTop) : 0);
@@ -85,6 +96,7 @@
       height: Math.max(minHeight, Math.round(height)),
       top: Math.round(top),
       keyboardShrunk,
+      keyboardOverlay,
       keyboardCandidate,
       visualBottom: Math.round(visualBottom),
       layout: Math.round(layout),

@@ -1,5 +1,8 @@
 "use strict";
 
+let voxsparkSurfaceHostRuntime = null;
+let voxsparkLexiconRuntime = null;
+
 const root = typeof globalThis !== "undefined" ? globalThis : window;
 
 function initializeThreadDetailRuntimeWiring() {
@@ -126,6 +129,10 @@ function initializeComposerRuntimeWiring() {
     newThreadSelectedPermissionMode,
     normalizeOptionList,
     normalizeThreadGoal,
+    onComposerSubmitted: (submission) => (
+      voxsparkSurfaceHostRuntime
+      && voxsparkSurfaceHostRuntime.handleComposerSubmission(submission)
+    ),
     openThreadGoalDialog,
     postClientEvent,
     publishPluginVoiceInputCapability,
@@ -168,6 +175,76 @@ function initializeComposerRuntimeWiring() {
     writeCurrentDraftToKey,
   });
   return composerRuntime;
+}
+
+function initializeVoxSparkSurfaceHostRuntimeWiring() {
+  if (voxsparkSurfaceHostRuntime) return voxsparkSurfaceHostRuntime;
+  const surfaceHostApi = window.CodexVoxSparkSurfaceHostRuntime;
+  if (!surfaceHostApi || typeof surfaceHostApi.createVoxSparkSurfaceHostRuntime !== "function") return null;
+  const composer = initializeComposerRuntimeWiring();
+  voxsparkSurfaceHostRuntime = surfaceHostApi.createVoxSparkSurfaceHostRuntime({
+    document,
+    window,
+    location: window.location,
+    localStorage,
+    relay: (payload, options = {}) => api("/api/voxspark/surface/context", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal: options.signal,
+      timeoutMs: 4000,
+    }),
+    captureRequest: (operation, payload) => api(`/api/voxspark/surface/capture/${operation}`, {
+      method: "POST", body: JSON.stringify(payload), timeoutMs: 5000,
+    }).catch(error => {
+      if (error?.responseBody?.ok === false) return error.responseBody;
+      throw error;
+    }),
+    queueRequest: (operation, payload) => api(`/api/voxspark/surface/queue/${operation}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: operation === "complete" ? 10000 : 4000,
+    }),
+    $,
+    currentComposerThreadId,
+    composerTargetThread,
+    composerTargetActiveTurnId,
+    composerText: composer.composerText,
+    setComposerText: composer.setComposerText,
+    insertComposerText: composer.insertComposerText,
+    sendMessage: composer.sendMessage,
+    sendDraft: composer.sendVoxSparkDraft,
+    interruptActiveTurn: composer.interruptActiveTurn,
+    scheduleCurrentDraftSave,
+    threadTitle: (thread) => threadDisplayName(thread),
+    threadWorkspace: (thread) => basenameForFsPath(thread && thread.cwd || ""),
+    approvalPending: (threadId, turnId) => Boolean(
+      threadId
+      && turnId
+      && approvalsForTurn(threadId, turnId).some((request) => isApprovalActive(request))
+    ),
+    report: (code, detail) => postClientEvent("voxspark_surface_host", {
+      code: String(code || "unknown").slice(0, 80),
+      syncId: String(detail && detail.syncId || "").slice(0, 96),
+      surfaceRevision: Number.isInteger(detail && detail.surfaceRevision) ? detail.surfaceRevision : 0,
+      bridgeContextRevision: Number.isInteger(detail && detail.bridgeContextRevision) ? detail.bridgeContextRevision : 0,
+      clientAt: Number.isFinite(detail && detail.clientAt) ? detail.clientAt : 0,
+      relayMs: Number.isFinite(detail && detail.relayMs) ? Math.max(0, detail.relayMs) : 0,
+      requestStartedAt: Number.isFinite(detail && detail.requestStartedAt) ? detail.requestStartedAt : 0,
+      acknowledgedCount: Number.isInteger(detail && detail.acknowledgedCount) ? detail.acknowledgedCount : 0,
+      errorKind: ["timeout", "cancelled", "request_failed", "processing_failed"].includes(detail && detail.errorKind) ? detail.errorKind : "",
+      reason: ["context_mismatch", "not_focused"].includes(detail && detail.reason) ? detail.reason : "",
+      action: String(detail && detail.action || "").slice(0, 24),
+      outcome: String(detail && detail.outcome || "").slice(0, 24),
+      captureId: String(detail && detail.captureId || "").slice(0, 96),
+      actionId: String(detail && detail.actionId || "").slice(0, 96),
+      commandSequence: Number.isInteger(detail && detail.commandSequence)
+        ? detail.commandSequence
+        : 0,
+    }),
+  });
+  voxsparkSurfaceHostRuntime.start();
+  window.voxsparkSurfaceHostRuntime = voxsparkSurfaceHostRuntime;
+  return voxsparkSurfaceHostRuntime;
 }
 
 function initializeThreadListRuntimeWiring() {
@@ -343,9 +420,28 @@ function initializeThreadTileRuntimeWiring() {
   return threadTileRuntime;
 }
 
+function initializeVoxSparkLexiconRuntimeWiring() {
+  if (voxsparkLexiconRuntime) return voxsparkLexiconRuntime;
+  const factory = window.CodexVoxSparkLexiconRuntime?.createVoxSparkLexiconRuntime;
+  if (!factory) return null;
+  voxsparkLexiconRuntime = factory({ document, $,
+    request: (action, payload) => api("/api/voxspark/lexicon", action === "list"
+      ? { method: "GET", timeoutMs: 6000 }
+      : { method: "POST", body: JSON.stringify({ ...payload, action }), timeoutMs: 6000 })
+      .catch(error => {
+        if (error?.responseBody?.ok === false) return error.responseBody;
+        throw error;
+      }),
+  });
+  voxsparkLexiconRuntime?.initialize();
+  return voxsparkLexiconRuntime;
+}
+
 function initializeCodexMobileRuntimeWiring() {
   initializeThreadDetailRuntimeWiring();
   initializeComposerRuntimeWiring();
+  initializeVoxSparkSurfaceHostRuntimeWiring();
+  initializeVoxSparkLexiconRuntimeWiring();
   initializeThreadListRuntimeWiring();
   initializeThreadTileRuntimeWiring();
 }

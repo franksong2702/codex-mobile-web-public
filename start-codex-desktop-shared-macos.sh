@@ -192,6 +192,8 @@ CODEX_APP_NAME="$(resolve_app_name "$CODEX_APP_PATH")"
 NODE_EXE_VALUE="$(resolve_command "$NODE_EXE_VALUE" node)"
 REAL_CODEX_EXE="$(resolve_codex_command "$REAL_CODEX_EXE")"
 MUX_WRAPPER="$(resolve_command "$MUX_WRAPPER" codex-app-server-mux-macos.sh)"
+MUX_WRAPPER_DIR="$(cd "$(dirname "$MUX_WRAPPER")" && pwd)"
+MUX_WRAPPER_COMMAND="$(basename "$MUX_WRAPPER")"
 
 for executable in "$CODEX_DESKTOP_EXE" "$MUX_WRAPPER" "$NODE_EXE_VALUE" "$REAL_CODEX_EXE"; do
   if [[ "$executable" == */* && ! -x "$executable" ]]; then
@@ -218,16 +220,18 @@ if [[ "$PRINT_ONLY" -eq 0 ]] && codex_is_running; then
 fi
 
 export CODEX_HOME="$CODEX_HOME_VALUE"
-export CODEX_CLI_PATH="$MUX_WRAPPER"
+export CODEX_CLI_PATH="$MUX_WRAPPER_COMMAND"
 export CODEX_MUX_SCRIPT_PATH="$SCRIPT_DIR/codex-app-server-mux.js"
 export CODEX_MUX_CODEX_EXE="$REAL_CODEX_EXE"
 export CODEX_MUX_NODE_EXE="$NODE_EXE_VALUE"
+LAUNCH_PATH="$MUX_WRAPPER_DIR:${PATH:-/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
 echo "Codex Desktop shared app-server launch environment:"
 echo "  Desktop app: $CODEX_APP_PATH"
 echo "  Desktop app name: $CODEX_APP_NAME"
 echo "  Desktop executable: $CODEX_DESKTOP_EXE"
 echo "  CODEX_CLI_PATH=$CODEX_CLI_PATH"
+echo "  CODEX_CLI_RESOLVED_PATH=$MUX_WRAPPER"
 echo "  CODEX_MUX_SCRIPT_PATH=$CODEX_MUX_SCRIPT_PATH"
 echo "  CODEX_MUX_CODEX_EXE=$CODEX_MUX_CODEX_EXE"
 echo "  CODEX_MUX_NODE_EXE=$CODEX_MUX_NODE_EXE"
@@ -239,6 +243,7 @@ if [[ "$PRINT_ONLY" -eq 1 ]]; then
 fi
 
 exec /usr/bin/open -n \
+  --env "PATH=$LAUNCH_PATH" \
   --env "CODEX_HOME=$CODEX_HOME" \
   --env "CODEX_CLI_PATH=$CODEX_CLI_PATH" \
   --env "CODEX_MUX_SCRIPT_PATH=$CODEX_MUX_SCRIPT_PATH" \

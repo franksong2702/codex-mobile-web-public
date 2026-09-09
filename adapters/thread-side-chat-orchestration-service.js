@@ -101,6 +101,7 @@ function createThreadSideChatOrchestrationService(options = {}) {
     const next = Object.assign({}, runtimeSettings || {});
     next.approvalPolicy = "on-request";
     next.permissionProfile = null;
+    next.permissionProfileId = "";
     next.sandboxPolicy = readOnlySandboxPolicy(next.sandboxPolicy);
     next.sandboxMode = "read-only";
     return next;
@@ -215,6 +216,7 @@ function createThreadSideChatOrchestrationService(options = {}) {
     }, settings);
     startParams.sandbox = "read-only";
     delete startParams.permissionProfile;
+    delete startParams.permissions;
     const startResult = await codex.request("thread/start", startParams, {
       timeoutMs: mutationRpcTimeoutMs,
       retry: false,

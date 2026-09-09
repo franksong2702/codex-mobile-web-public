@@ -42,6 +42,7 @@ test("server runtime permission policy applies app-server sandbox modes", () => 
     sandboxPolicy: { type: "dangerFullAccess" },
     sandboxMode: "danger-full-access",
     permissionProfile: null,
+    permissionProfileId: "",
   });
 
   const auto = service.applyPermissionModeOverride({}, "workspace-write", "/workspace");

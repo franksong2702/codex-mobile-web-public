@@ -236,6 +236,14 @@ function isMenuOverlayMode() {
     && !window.matchMedia(TABLET_SPLIT_MEDIA).matches;
 }
 
+function isStandaloneMobilePwa() {
+  if (isHermesEmbedMode() || !isPwaMode()) return false;
+  const coarsePointer = Boolean(window.matchMedia
+    && window.matchMedia("(pointer: coarse)").matches);
+  const userAgent = String(typeof navigator !== "undefined" && navigator.userAgent || "");
+  return coarsePointer || /iPhone|iPad|iPod/i.test(userAgent);
+}
+
 function viewportState() {
   const embedded = isHermesEmbedMode();
   const hostViewport = state.pluginHostViewport && typeof state.pluginHostViewport === "object"
@@ -248,6 +256,7 @@ function viewportState() {
     ? hostViewport.footer
     : null;
   const measured = viewportMetrics.measureViewport({
+    visualViewportAvailable: Boolean(window.visualViewport),
     visualHeight: window.visualViewport && window.visualViewport.height,
     visualOffsetTop: window.visualViewport && window.visualViewport.offsetTop,
     scrollTop: embedded ? Math.max(
@@ -259,6 +268,8 @@ function viewportState() {
     innerHeight: window.innerHeight,
     clientHeight: document.documentElement && document.documentElement.clientHeight,
     activeElement: document.activeElement,
+    composerInputActive: document.activeElement === $("messageInput"),
+    standaloneMobilePwa: isStandaloneMobilePwa(),
     hostViewportHeight: embedded && hostViewport && hostViewport.viewport ? hostViewport.viewport.height : 0,
     hostKeyboardVisible: Boolean(embedded && hostKeyboard && hostKeyboard.visible),
     hostKeyboardBottomInset: embedded && hostKeyboard ? hostKeyboard.bottomInset : 0,
@@ -305,9 +316,57 @@ function resetMobileKeyboardWindowScroll() {
   if (document.body) document.body.scrollTop = 0;
 }
 
+const STANDALONE_OVERLAY_COMPOSER_STYLE_PROPERTIES = Object.freeze([
+  "position",
+  "top",
+  "bottom",
+  "left",
+  "right",
+  "width",
+  "maxWidth",
+  "margin",
+  "zIndex",
+]);
+
+function applyStandaloneOverlayComposerLayout(viewport) {
+  const active = Boolean(viewport && viewport.keyboardOverlay && !isHermesEmbedMode());
+  document.documentElement.classList.toggle("keyboard-overlay-open", active);
+  const composer = $("composer");
+  if (!composer) return active;
+  if (!active) {
+    const previous = state.standaloneOverlayComposerInlineStyles;
+    if (previous && typeof previous === "object") {
+      for (const property of STANDALONE_OVERLAY_COMPOSER_STYLE_PROPERTIES) {
+        composer.style[property] = String(previous[property] || "");
+      }
+    }
+    delete state.standaloneOverlayComposerInlineStyles;
+    composer.removeAttribute("data-standalone-overlay-keyboard");
+    return false;
+  }
+  if (!state.standaloneOverlayComposerInlineStyles) {
+    state.standaloneOverlayComposerInlineStyles = {};
+    for (const property of STANDALONE_OVERLAY_COMPOSER_STYLE_PROPERTIES) {
+      state.standaloneOverlayComposerInlineStyles[property] = composer.style[property] || "";
+    }
+  }
+  composer.dataset.standaloneOverlayKeyboard = "true";
+  composer.style.position = "fixed";
+  composer.style.top = "env(safe-area-inset-top, 0px)";
+  composer.style.bottom = "auto";
+  composer.style.left = "0";
+  composer.style.right = "0";
+  composer.style.width = "100%";
+  composer.style.maxWidth = "none";
+  composer.style.margin = "0";
+  composer.style.zIndex = "50";
+  return true;
+}
+
 function updateViewportVars() {
   resetMobileKeyboardWindowScroll();
   const viewport = viewportState();
+  applyStandaloneOverlayComposerLayout(viewport);
   if (viewport.keyboardShrunk) {
     setStableRootPixelVar("--app-top", viewport.top, "viewportAppTopPx");
     setStableRootPixelVar("--app-height", viewport.height, "viewportAppHeightPx");
@@ -319,7 +378,8 @@ function updateViewportVars() {
   }
   setStableRootPixelVar("--host-top-safe-area", viewport.hostTopSafeArea, "hostTopSafeAreaPx", { epsilonPx: 0 });
   setStableRootPixelVar("--host-bottom-safe-area", viewport.hostBottomSafeArea, "hostBottomSafeAreaPx", { epsilonPx: 0 });
-  document.documentElement.classList.toggle("keyboard-open", viewport.keyboardShrunk);
+  const keyboardOpen = Boolean(viewport.keyboardShrunk || viewport.keyboardOverlay);
+  document.documentElement.classList.toggle("keyboard-open", keyboardOpen);
 }
 
 function createSubmissionId() {
@@ -2834,12 +2894,14 @@ const settingsRuntimeApi = Object.freeze({ createSettingsRuntime });
     setFontSizePreference,
     handleFontSizeChoice,
     isMenuOverlayMode,
+    isStandaloneMobilePwa,
     viewportState,
     viewportHeight,
     setStableRootPixelVar,
     isKeyboardEditableElement,
     isHermesKeyboardInputActive,
     resetMobileKeyboardWindowScroll,
+    applyStandaloneOverlayComposerLayout,
     updateViewportVars,
     createSubmissionId,
     pruneRecentSubmittedUserMessages,

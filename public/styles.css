@@ -481,6 +481,10 @@ textarea {
   background: var(--bg);
 }
 
+html.keyboard-open:not(.embed-hermes) .app {
+  min-height: 0;
+}
+
 html.embed-hermes,
 html.embed-hermes body {
   width: 100%;
@@ -8845,3 +8849,108 @@ html:not(.embed-hermes).sidebar-overlay-mode .sidebar .mobile-only {
     opacity: 0.34;
   }
 }
+
+
+/* Voice metadata stays in normal Composer flow and never takes input focus. */
+.voxspark-voice-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+  padding: 3px 2px 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.voxspark-voice-status[hidden] { display: none; }
+.voxspark-voice-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.voxspark-voice-duration { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.voxspark-voice-status[data-state="recording"] { color: var(--composer-target-accent); }
+.voxspark-voice-status[data-elsewhere="true"] {
+  color: var(--warning-text);
+  background: color-mix(in srgb, var(--warning-text) 10%, transparent);
+  border-inline-start: 3px solid currentColor;
+  border-radius: 4px;
+  padding-inline: 8px;
+}
+.voxspark-voice-status[data-state="failed"] { color: var(--danger, #d45b65); }
+
+
+.voxspark-queue { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.voxspark-queue[hidden], .voxspark-queue [hidden] { display: none; }
+.voxspark-queue summary { cursor: pointer; width: fit-content; padding: 5px 0; }
+.voxspark-queue p { margin: 5px 0; }
+.voxspark-queue ol { list-style: none; padding: 0; margin: 0; max-height: 210px; overflow-y: auto; }
+.voxspark-queue-item { padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.voxspark-queue-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.voxspark-queue-actions button { padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.voxspark-queue-actions button:disabled { opacity: .5; cursor: default; }
+.voxspark-queue-actions button:focus-visible, .voxspark-queue summary:focus-visible { outline: 2px solid var(--composer-target-accent); outline-offset: 2px; }
+.voxspark-queue-preview { white-space: pre-wrap; max-height: 100px; overflow-y: auto; color: var(--text); }
+
+
+/* On narrow screens composer-body becomes display:contents; give both status
+   regions full-width rows before controls instead of automatic grid placement. */
+@media (max-width: 760px) {
+  .voxspark-voice-status { grid-area: voice; }
+  .voxspark-queue { grid-area: queue; min-width: 0; }
+  .composer:has(.voxspark-voice-status:not([hidden])) {
+    grid-template-areas: "voice voice voice" "controls controls controls" "attachments attachments attachments" "attach input send";
+  }
+  .composer:has(.voxspark-queue:not([hidden])) {
+    grid-template-areas: "queue queue queue" "controls controls controls" "attachments attachments attachments" "attach input send";
+  }
+  .composer:has(.voxspark-voice-status:not([hidden])):has(.voxspark-queue:not([hidden])) {
+    grid-template-areas: "voice voice voice" "queue queue queue" "controls controls controls" "attachments attachments attachments" "attach input send";
+  }
+}
+
+.voxspark-recovery { grid-column: 1 / -1; flex: 0 0 100%; width: 100%; min-width: 0; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; }
+.voxspark-recovery[hidden] { display: none; }
+.voxspark-recovery p { margin: 0 0 6px; color: var(--muted); }
+.voxspark-recovery ul { list-style: none; margin: 0; padding: 0; }
+.voxspark-recovery-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 0; overflow-wrap: anywhere; }
+.voxspark-recovery-item > span { flex: 1 1 180px; }
+
+@media (max-width: 760px) {
+  .voxspark-recovery { grid-area: recovery; }
+  .composer:has(.voxspark-recovery:not([hidden])) {
+    grid-template-areas: "recovery recovery recovery" "controls controls controls" "attachments attachments attachments" "attach input send";
+  }
+  .composer:has(.voxspark-recovery:not([hidden])):has(.voxspark-voice-status:not([hidden])) {
+    grid-template-areas: "voice voice voice" "recovery recovery recovery" "controls controls controls" "attachments attachments attachments" "attach input send";
+  }
+  .composer:has(.voxspark-recovery:not([hidden])):has(.voxspark-queue:not([hidden])) {
+    grid-template-areas: "recovery recovery recovery" "queue queue queue" "controls controls controls" "attachments attachments attachments" "attach input send";
+  }
+  .composer:has(.voxspark-recovery:not([hidden])):has(.voxspark-voice-status:not([hidden])):has(.voxspark-queue:not([hidden])) {
+    grid-template-areas: "voice voice voice" "recovery recovery recovery" "queue queue queue" "controls controls controls" "attachments attachments attachments" "attach input send";
+  }
+}
+
+.voxspark-lexicon-open { width: 100%; padding: 9px 12px; text-align: left; background: var(--code); color: var(--text); border: 1px solid var(--line); border-radius: 8px; font: inherit; cursor: pointer; }
+.voxspark-lexicon-dialog { box-sizing: border-box; width: min(620px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 20px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow-y: auto; overscroll-behavior: contain; }
+.voxspark-lexicon-dialog::backdrop { background: rgb(0 0 0 / .48); }
+.voxspark-lexicon-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.voxspark-lexicon-heading h2 { margin: 0; font-size: 20px; }
+.voxspark-lexicon-help { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0; }
+.voxspark-lexicon-form { display: grid; gap: 6px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.voxspark-lexicon-form label { font-size: 13px; }
+.voxspark-lexicon-dialog input { box-sizing: border-box; min-width: 0; width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+.voxspark-lexicon-dialog button { padding: 7px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--code); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.voxspark-lexicon-dialog button:disabled { opacity: .5; cursor: default; }
+.voxspark-lexicon-dialog button:focus-visible, .voxspark-lexicon-open:focus-visible { outline: 2px solid var(--composer-target-accent); outline-offset: 2px; }
+.voxspark-lexicon-status { font-size: 13px; line-height: 1.6; min-height: 1.6em; margin: 12px 0; }
+.voxspark-lexicon-status[data-error="true"] { color: var(--warning-text); }
+.voxspark-lexicon-toolbar { display: flex; align-items: center; gap: 8px; }
+.voxspark-lexicon-toolbar button { flex-shrink: 0; }
+.voxspark-lexicon-items, .voxspark-lexicon-aliases { margin: 0; padding: 0; list-style: none; }
+.voxspark-lexicon-item { padding: 12px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.voxspark-lexicon-item-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+.voxspark-lexicon-badge { font-size: 12px; color: var(--muted); }
+.voxspark-lexicon-aliases li { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 12px; }
+.voxspark-lexicon-aliases button { flex-shrink: 0; }
+.voxspark-lexicon-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 9px; font-size: 12px; }
+.voxspark-lexicon-dialog .voxspark-lexicon-danger { color: var(--danger, #d45b65); }
+@media (max-width: 480px) { .voxspark-lexicon-dialog { padding: 14px; } .voxspark-lexicon-dialog input { font-size: 16px; } }

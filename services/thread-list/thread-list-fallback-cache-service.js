@@ -638,9 +638,10 @@ function createThreadListFallbackCacheService(options = {}) {
   function readFallback(limit = 80, filters = {}) {
     const diagnostics = filters.diagnostics && typeof filters.diagnostics === "object" ? filters.diagnostics : null;
     const key = cacheKey(limit, filters);
-    const cached = read(key, diagnostics)
+    const forceBaseline = filters.forceBaseline === true;
+    const cached = forceBaseline ? null : (read(key, diagnostics)
       || readCompatible(limit, filters, diagnostics)
-      || readWorkspaceDerivedCompatible(limit, filters, diagnostics);
+      || readWorkspaceDerivedCompatible(limit, filters, diagnostics));
     if (cached) {
       if (diagnostics) {
         diagnostics.cacheHit = true;
@@ -667,9 +668,9 @@ function createThreadListFallbackCacheService(options = {}) {
     }
     if (diagnostics) {
       diagnostics.cacheHit = false;
-      const missDecision = diagnostics.cacheDecision || "miss";
+      const missDecision = forceBaseline ? "forced-baseline" : (diagnostics.cacheDecision || "miss");
       diagnostics.cacheBuildReason = missDecision;
-      diagnostics.cacheDecision = missDecision === "expired" ? "expired-rebuild" : "miss-rebuild";
+      diagnostics.cacheDecision = missDecision === "expired" ? "expired-rebuild" : `${missDecision}-rebuild`;
     }
     const baseline = baselineService.readBaseline(limit, Object.assign({}, filters, {
       sourceSnapshotKey: sourceSnapshotKey(limit, filters),
@@ -700,7 +701,7 @@ function createThreadListFallbackCacheService(options = {}) {
         diagnostics.sourceSnapshotRawCount = Number(baselineTimings.sourceSnapshotRawCount || 0);
       }
     }
-    remember(key, safeThreads, {
+    if (!forceBaseline) remember(key, safeThreads, {
       stateDbMs: Number(baselineTimings.stateDbMs || 0),
       rolloutMs: Number(baselineTimings.rolloutMs || 0),
       sessionIndexMs: Number(baselineTimings.sessionIndexMs || 0),

@@ -308,6 +308,7 @@ test("server runtime inheritance includes model and reasoning effort", () => {
   assert.match(settingsBody, /lastString\(context\.model, thread && thread\.model, codexConfigDefaults\.model\)/, "runtime settings should inherit model from rollout, state DB, or config");
   assert.match(settingsBody, /lastString\(context\.effort, context\.reasoning_effort, context\.model_reasoning_effort, thread && thread\.effort, codexConfigDefaults\.reasoningEffort\)/, "runtime settings should inherit reasoning effort from rollout, state DB, or config");
   assert.match(settingsBody, /model,\s*reasoningEffort,/, "runtime settings response should expose inherited model and effort");
+  assert.match(settingsBody, /context\.active_permission_profile && context\.active_permission_profile\.id/, "runtime settings should inherit the active named permission profile id");
 
   const startBody = functionBody(taskCardRuntimePolicyServiceJs, "applyStartThreadRuntimeSettings");
   assert.match(startBody, /attachWorkspaceDelegationRuntimeGuidance\(params\)/, "thread/start should receive workspace delegation guidance when enabled");
@@ -336,7 +337,8 @@ test("server runtime inheritance includes model and reasoning effort", () => {
   assert.match(guardBody, /options\.workspaceDelegationEnforceSandboxGuard/, "explicit hard sandbox env should override approval-proxy-only compatibility");
   assert.match(guardBody, /params\.approvalPolicy = "on-request"/, "default guard should keep approval events available for current .git auto-allow and foreign-source denials");
   assert.match(guardBody, /params\.sandboxPolicy = workspaceDelegationWriteGuardSandboxPolicy\(cwd, settings && settings\.sandboxPolicy\)/, "turn/start should receive a real workspace-write sandbox policy by default");
-  assert.match(guardBody, /workspaceDelegationWriteGuardPermissionProfile\(cwd, settings && settings\.sandboxPolicy\)/, "opt-in hard guard should still use a bounded managed permission profile");
+  assert.match(guardBody, /delete params\.permissionProfile/, "runtime guard should remove the deprecated permissionProfile request field");
+  assert.match(guardBody, /delete params\.permissions/, "runtime guard should avoid combining named permissions with a sandbox policy");
   assert.match(guardBody, /delete params\.sandboxPolicy/, "guard should be able to clear stale workspace-write sandbox policy");
   assert.match(guardBody, /params\.sandbox = "workspace-write"/, "thread/start and thread/resume should still support workspace-write sandbox mode");
 

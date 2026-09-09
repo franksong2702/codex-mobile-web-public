@@ -584,6 +584,44 @@ test("thread message route queues slow active-turn steering before turn steer re
   assert.ok(events.some((entry) => entry.event === "steer-background-done"));
 });
 
+test("VoxSpark steering waits for a terminal Codex result before success", async () => {
+  const steer = deferred();
+  const { route, requests } = createRouteHarness({
+    activeTurnSteerFastAcceptMs: 0,
+    codex: {
+      request: async (method, params) => {
+        requests.push({ method, params });
+        if (method === "turn/steer") return steer.promise;
+        return { ok: true };
+      },
+      notifyMuxUserMessage: () => {},
+    },
+  });
+  let response = null;
+  const handling = route.handleRoute({
+    url: new URL("http://127.0.0.1/api/threads/thread-1/messages"),
+    method: "POST",
+    readMessageBody: async () => ({
+      fields: {
+        text: "wait for durable steer",
+        activeTurnId: "active-turn-1",
+        clientSubmissionId: "voxspark-action-durable-steer",
+      },
+      uploads: [],
+    }),
+    sendJson: (status, body) => { response = { status, body }; },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(response, null);
+  assert.deepEqual(requests.map((entry) => entry.method), ["turn/steer"]);
+  steer.resolve({ turnId: "active-turn-1" });
+  await handling;
+  assert.equal(response.status, 200);
+  assert.equal(response.body.turnId, "active-turn-1");
+  assert.equal(response.body.steeringQueued, undefined);
+});
+
 test("thread message route defaults active-turn steering to a short fast-accept window", async () => {
   const steer = deferred();
   const events = [];

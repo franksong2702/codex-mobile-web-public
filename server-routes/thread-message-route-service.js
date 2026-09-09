@@ -365,6 +365,13 @@ function createThreadMessageRouteService(dependencies = {}) {
       });
       const submissionKeyStartedAtMs = Date.now();
       const submissionKeys = messageSubmissionKeys(threadId, body, textForInput, uploads);
+      const durableVoxSparkSubmission = String(body.clientSubmissionId || "").startsWith("voxspark-");
+      const strictSteer = String(body.strictSteer || "").trim() === "1";
+      if (strictSteer && !String(body.activeTurnId || "").trim()) {
+        timings.totalMs = Math.max(0, Date.now() - routeStartedAtMs);
+        timedSendJson(400, { error: "strictSteer requires activeTurnId", code: "strict_steer_active_turn_required" });
+        return { handled: true };
+      }
       markSubmitTiming(timings, "submissionKeyMs", submissionKeyStartedAtMs);
       const requestedModel = await allowedRequestedModel(body.model);
       const requestedEffort = reasoningEffortOptions.includes(String(body.effort || "").trim())
@@ -379,7 +386,16 @@ function createThreadMessageRouteService(dependencies = {}) {
           const runtimeSettings = applyPermissionModeOverride(await resolveThreadRuntimeSettings(threadId), body.permissionMode, body.cwd || null);
           markSubmitTiming(timings, "runtimeSettingsMs", runtimeStartedAtMs);
           let skipTurnSteer = false;
-          if (body.activeTurnId) {
+          if (strictSteer) {
+            const strictPreflight = await staleActiveTurnPreflight(codex, threadId, String(body.activeTurnId));
+            if (strictPreflight && strictPreflight.stale) {
+              const err = new Error("VoxSpark strict steer target turn is stale");
+              err.code = "voxspark_strict_steer_stale";
+              err.statusCode = 409;
+              throw err;
+            }
+          }
+          if (body.activeTurnId && !strictSteer) {
             const preflightStartedAtMs = Date.now();
             const preflightPromise = Promise.resolve()
               .then(() => staleActiveTurnPreflight(codex, threadId, String(body.activeTurnId)))
@@ -577,7 +593,7 @@ function createThreadMessageRouteService(dependencies = {}) {
               });
             };
             const startSteerRequest = () => {
-              rememberPendingSteerEcho();
+              if (!strictSteer) rememberPendingSteerEcho();
               const steerStartedAtMs = Date.now();
               return codex.request("turn/steer", {
                 threadId,
@@ -614,6 +630,12 @@ function createThreadMessageRouteService(dependencies = {}) {
               }
               const err = outcome && outcome.error;
               if (isTurnSteerUnsupportedError(err)) {
+                if (strictSteer) {
+                  const strictErr = new Error("VoxSpark strict steer is unsupported");
+                  strictErr.code = "voxspark_strict_steer_unsupported";
+                  strictErr.statusCode = 409;
+                  throw strictErr;
+                }
                 notifySteeredUserMessage();
                 if (background) {
                   logMessageSubmit("steer-background-unsupported", {
@@ -626,6 +648,11 @@ function createThreadMessageRouteService(dependencies = {}) {
                 return { handled: true, result: {} };
               }
               if (!isStaleActiveTurnError(err)) throw err;
+              if (strictSteer) {
+                if (err) err.code = "voxspark_strict_steer_stale";
+                if (err) err.statusCode = 409;
+                throw err;
+              }
               if (!background && pendingSteerEchoKey) pendingSteerEchoStore.forget(pendingSteerEchoKey);
               logMessageSubmit(background ? "active-turn-stale-background" : "active-turn-stale", {
                 threadId,
@@ -638,10 +665,12 @@ function createThreadMessageRouteService(dependencies = {}) {
             };
             const steerPromise = startSteerRequest();
             const fastAcceptMs = Math.max(0, Number(activeTurnSteerFastAcceptMs) || 0);
-            const firstSteerOutcome = await Promise.race([
-              steerPromise,
-              resolveAfter(fastAcceptMs, { pending: true }),
-            ]);
+            const firstSteerOutcome = strictSteer || durableVoxSparkSubmission
+              ? await steerPromise
+              : await Promise.race([
+                  steerPromise,
+                  resolveAfter(fastAcceptMs, { pending: true }),
+                ]);
             if (firstSteerOutcome && firstSteerOutcome.pending) {
               timings.steerQueued = true;
               timings.steerFastAcceptMs = Math.max(0, Date.now() - routeStartedAtMs);
@@ -724,6 +753,27 @@ function createThreadMessageRouteService(dependencies = {}) {
         });
         if (isCodexAccountAuthError(err)) {
           timedSendJson(409, codexAccountAuthErrorPayload(err));
+          return { handled: true };
+        }
+        if (err && (err.code === "voxspark_strict_steer_stale" || err.code === "voxspark_strict_steer_unsupported")) {
+          timedSendJson(err.statusCode || 409, {
+            error: err.message || "VoxSpark strict steer failed",
+            code: err.code,
+          });
+          return { handled: true };
+        }
+        if (err && err.code === "voxspark_submission_outcome_unknown") {
+          timedSendJson(409, {
+            error: err.message || "VoxSpark submission outcome is unknown after restart",
+            code: "voxspark_submission_outcome_unknown",
+          });
+          return { handled: true };
+        }
+        if (err && err.code === "voxspark_submission_ledger_unavailable") {
+          timedSendJson(503, {
+            error: err.message || "VoxSpark submission ledger is unavailable",
+            code: "voxspark_submission_ledger_unavailable",
+          });
           return { handled: true };
         }
         throw err;

@@ -76,11 +76,13 @@ function detailMode(result, thread) {
 function createThreadDetailFirstPaintPrewarmService(options = {}) {
   const now = typeof options.now === "function" ? options.now : () => Date.now();
   const scheduleTimer = typeof options.setTimeout === "function" ? options.setTimeout : setTimeout;
+  const cancelTimer = typeof options.clearTimeout === "function" ? options.clearTimeout : clearTimeout;
   const enabled = options.enabled !== false;
   const delayMs = boundedNonNegativeInteger(options.delayMs, 75);
   const minIntervalMs = boundedNonNegativeInteger(options.minIntervalMs, 15000);
   const readyResultTtlMs = boundedNonNegativeInteger(options.readyResultTtlMs, 60000);
   const minRolloutBytes = boundedNonNegativeInteger(options.minRolloutBytes, 8 * 1024 * 1024);
+  const maxRolloutBytes = boundedNonNegativeInteger(options.maxRolloutBytes, 50 * 1024 * 1024);
   const maxPending = Math.max(1, boundedNonNegativeInteger(options.maxPending, 2));
   const readThreadDetail = typeof options.readThreadDetail === "function"
     ? options.readThreadDetail
@@ -94,6 +96,7 @@ function createThreadDetailFirstPaintPrewarmService(options = {}) {
   const lastResultByThread = new Map();
   let latestResult = null;
   let nextJobId = 0;
+  let running = false;
 
   async function prewarmNow(input = {}) {
     const threadId = text(input.threadId);
@@ -114,6 +117,14 @@ function createThreadDetailFirstPaintPrewarmService(options = {}) {
       return withThreadDetailFirstPaintPrewarmJobPolicy({ status: "skipped", reason: "not-active" });
     }
     const rolloutBytes = summaryRolloutSizeBytes(summary);
+    if (maxRolloutBytes > 0 && rolloutBytes > maxRolloutBytes) {
+      return withThreadDetailFirstPaintPrewarmJobPolicy({
+        status: "skipped",
+        reason: "rollout-too-large",
+        rolloutSizeBytes: rolloutBytes,
+        maxRolloutBytes,
+      });
+    }
     if (minRolloutBytes > 0 && rolloutBytes > 0 && rolloutBytes < minRolloutBytes) {
       return withThreadDetailFirstPaintPrewarmJobPolicy({
         status: "skipped",
@@ -159,12 +170,35 @@ function createThreadDetailFirstPaintPrewarmService(options = {}) {
 
   function finish(threadId, result, jobId = 0) {
     const current = pending.get(threadId);
-    if (!current || current.jobId === jobId) {
+    if (current && current.jobId === jobId) {
       pending.delete(threadId);
       const stored = Object.assign({ updatedAtMs: now(), threadId }, result || {});
       lastResultByThread.set(threadId, stored);
       latestResult = stored;
     }
+  }
+
+  function drain() {
+    if (running) return;
+    const next = [...pending.values()].find((entry) => entry.ready && !entry.running);
+    if (!next) return;
+    running = true;
+    next.running = true;
+    const { job } = next;
+    prewarmNow(job)
+      .then((result) => {
+        finish(job.threadId, result, job.jobId);
+        log("first_paint_prewarm_done", Object.assign({ threadId: job.threadId, trigger: boundedReason(job.reason) }, result));
+      })
+      .catch((err) => {
+        const result = { status: "failed", reason: boundedReason(err && err.message || err) || "prewarm-failed" };
+        finish(job.threadId, withThreadDetailFirstPaintPrewarmJobPolicy(result), job.jobId);
+        log("first_paint_prewarm_failed", { threadId: job.threadId, trigger: boundedReason(job.reason), reason: result.reason });
+      })
+      .finally(() => {
+        running = false;
+        drain();
+      });
   }
 
   function reusableReadyResult(result, current) {
@@ -178,6 +212,9 @@ function createThreadDetailFirstPaintPrewarmService(options = {}) {
     const threadId = text(input.threadId || input.summary && (input.summary.id || input.summary.threadId || input.summary.thread_id));
     if (!enabled) return withThreadDetailFirstPaintPrewarmJobPolicy({ scheduled: false, reason: "disabled" });
     if (!threadId) return withThreadDetailFirstPaintPrewarmJobPolicy({ scheduled: false, reason: "missing-thread-id" });
+    if (pending.get(threadId)?.running) {
+      return withThreadDetailFirstPaintPrewarmJobPolicy({ scheduled: false, reason: "already-running" });
+    }
     if (pending.has(threadId) && input.preemptPending !== true) {
       return withThreadDetailFirstPaintPrewarmJobPolicy({ scheduled: false, reason: "already-pending" });
     }
@@ -196,25 +233,27 @@ function createThreadDetailFirstPaintPrewarmService(options = {}) {
     lastAttemptAtByThread.set(threadId, current);
     const jobId = ++nextJobId;
     const job = Object.assign({}, input, { threadId, jobId });
+    const previous = pending.get(threadId);
+    if (previous && previous.timer) cancelTimer(previous.timer);
     pending.set(threadId, {
       scheduledAtMs: current,
       reason: boundedReason(input.reason),
       jobId,
       preemptedPrevious: input.preemptPending === true,
+      job,
+      ready: false,
+      running: false,
     });
     const jobDelayMs = boundedDelayMs(input.delayMs, delayMs);
     const timer = scheduleTimer(() => {
-      prewarmNow(job)
-        .then((result) => {
-          finish(threadId, result, jobId);
-          log("first_paint_prewarm_done", Object.assign({ threadId, trigger: boundedReason(job.reason) }, result));
-        })
-        .catch((err) => {
-          const result = { status: "failed", reason: boundedReason(err && err.message || err) || "prewarm-failed" };
-          finish(threadId, withThreadDetailFirstPaintPrewarmJobPolicy(result), jobId);
-          log("first_paint_prewarm_failed", { threadId, trigger: boundedReason(job.reason), reason: result.reason });
-        });
+      const current = pending.get(threadId);
+      // Cancellation can race timer dispatch: only the current job may read.
+      if (!current || current.jobId !== jobId) return;
+      current.ready = true;
+      drain();
     }, jobDelayMs);
+    const currentJob = pending.get(threadId);
+    if (currentJob && currentJob.jobId === jobId) currentJob.timer = timer;
     if (timer && typeof timer.unref === "function") timer.unref();
     return withThreadDetailFirstPaintPrewarmJobPolicy({ scheduled: true, reason: "scheduled" });
   }
